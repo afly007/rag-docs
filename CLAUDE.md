@@ -102,8 +102,11 @@ Workflow files (`.github/workflows/`) require the `workflow` OAuth scope to merg
 - On `v*` tags, also pushes a `:vX.Y.Z` tag alongside `:latest` and `:<sha>`
 - SSH deploy step requires secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN` — **not yet configured**, deploy is currently manual
 
-## Deploy (manual, until secrets are set up)
+## Deploy
 
+Merges to `main` auto-deploy via the self-hosted GitHub Actions runner (`~/actions-runner` on the server). The runner runs as a systemd service (`actions.runner.afly007-rag-docs.rag-docs-server`).
+
+Manual fallback:
 ```bash
 cd ~/rag-docs
 docker compose pull mcp-server
@@ -184,6 +187,6 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 | Priority | Feature | Notes |
 |---|---|---|
 | 1 | **openai 1→2 migration** | Breaking rewrite of the Python SDK. Unblocks the `httpx<0.28.0` pin. Both `ingest.py` and `server.py` need changes. Test carefully before deploying. |
-| 2 | **Deploy secrets** | Configure `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN` in repo Settings → Secrets → Actions. Closes the CI/CD loop so merges to main auto-deploy. |
+| 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
 | 3 | **SSE keepalive** | Connections drop after ~6 min of idle (router/firewall kills TCP). Investigate uvicorn `ws_ping_interval` or mcp 1.27 SSE ping settings. Workaround: start a fresh Claude conversation. |
 | 4 | **PR #3** (`docker/build-push-action 5→7`) | Requires `workflow` OAuth scope — merge in the browser at https://github.com/afly007/rag-docs/pull/3 |
