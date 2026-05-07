@@ -111,3 +111,7 @@ def main():
     if done:
         print("\nReview the .json files in docs/, edit any incorrect values,")
         print("then re-ingest to apply metadata:  make ingest-force")
+
+
+if __name__ == "__main__":
+    main()
