@@ -17,7 +17,10 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    Modifier,
     PointStruct,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 from tqdm import tqdm
@@ -34,6 +37,7 @@ CHUNK_SIZE = 750
 CHUNK_OVERLAP = 100
 EMBED_BATCH = 100
 UPSERT_BATCH = 200
+PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
 
 # Recognised sidecar keys — any unknown keys are passed through as-is
 KNOWN_META_KEYS = {"vendor", "product", "version", "doc_type"}
@@ -43,12 +47,20 @@ qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 enc = tiktoken.get_encoding("cl100k_base")
 
 
+def compute_sparse(text: str) -> SparseVector:
+    counts: dict[int, float] = {}
+    for tid in enc.encode(text):
+        counts[tid] = counts.get(tid, 0.0) + 1.0
+    return SparseVector(indices=list(counts), values=list(counts.values()))
+
+
 def ensure_collection():
     existing = {c.name for c in qdrant.get_collections().collections}
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            vectors_config={"dense": VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)},
+            sparse_vectors_config={"bm25": SparseVectorParams(modifier=Modifier.IDF)},
         )
         print(f"Created collection '{COLLECTION_NAME}'")
 
@@ -198,12 +210,15 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
 
     all_chunks = embed_chunks(all_chunks)
 
+    for chunk in all_chunks:
+        chunk["sparse"] = compute_sparse(chunk["text"])
+
     # Build payload: fixed fields + chunk_index + all metadata keys
     payload_keys = {"text", "source", "page", "chunk_index"} | set(meta.keys())
     points = [
         PointStruct(
             id=c["id"],
-            vector=c["vector"],
+            vector={"dense": c["vector"], "bm25": c["sparse"]},
             payload={k: c[k] for k in payload_keys},
         )
         for c in all_chunks
