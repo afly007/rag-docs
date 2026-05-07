@@ -48,7 +48,7 @@ def connect_qdrant(retries: int = 10, delay: float = 2.0) -> QdrantClient:
     raise RuntimeError("Could not connect to Qdrant after multiple retries")
 
 
-def build_filter(vendor: str, product: str, doc_type: str) -> Filter | None:
+def build_filter(vendor: str, product: str, doc_type: str, version: str) -> Filter | None:
     conditions = []
     if vendor:
         conditions.append(FieldCondition(key="vendor", match=MatchValue(value=vendor)))
@@ -56,6 +56,8 @@ def build_filter(vendor: str, product: str, doc_type: str) -> Filter | None:
         conditions.append(FieldCondition(key="product", match=MatchValue(value=product)))
     if doc_type:
         conditions.append(FieldCondition(key="doc_type", match=MatchValue(value=doc_type)))
+    if version:
+        conditions.append(FieldCondition(key="version", match=MatchValue(value=version)))
     return Filter(must=conditions) if conditions else None
 
 
@@ -164,6 +166,7 @@ async def list_docs() -> str:
 
     vendors = sorted({v for s in stats["sources"].values() if (v := s.get("vendor"))})
     products = sorted({v for s in stats["sources"].values() if (v := s.get("product"))})
+    versions = sorted({v for s in stats["sources"].values() if (v := s.get("version"))})
     doc_types = sorted({v for s in stats["sources"].values() if (v := s.get("doc_type"))})
 
     lines = [
@@ -172,6 +175,7 @@ async def list_docs() -> str:
         "",
         f"Available vendors:   {', '.join(vendors) or '(none tagged)'}",
         f"Available products:  {', '.join(products) or '(none tagged)'}",
+        f"Available versions:  {', '.join(versions) or '(none tagged)'}",
         f"Available doc_types: {', '.join(doc_types) or '(none tagged)'}",
         "",
         f"{'Document':<45} {'Vendor':<12} {'Product':<12} {'Version':<10} {'Doc Type':<16} Chunks",
@@ -189,7 +193,7 @@ async def list_docs() -> str:
 
     lines += [
         "",
-        "Use search_docs(query, vendor=..., product=..., doc_type=...) to filter results.",
+        "Use search_docs(query, vendor=..., product=..., doc_type=..., version=...) to filter results.",
         "Untagged documents are searched when no filter is specified.",
     ]
     return "\n".join(lines)
@@ -243,6 +247,7 @@ async def search_docs(
     vendor: str = "",
     product: str = "",
     doc_type: str = "",
+    version: str = "",
 ) -> str:
     """
     Search ingested vendor documentation for the most relevant sections.
@@ -255,10 +260,16 @@ async def search_docs(
         vendor:   Optional — filter to a specific vendor (e.g. "cisco", "juniper").
         product:  Optional — filter to a specific product (e.g. "ios-xe", "junos").
         doc_type: Optional — filter by document type (e.g. "cli-reference", "config-guide").
+        version:  Optional — filter to a specific version (e.g. "10.16", "17.9.1").
     """
     filter_desc = "  ".join(
         f"{k}={v}"
-        for k, v in [("vendor", vendor), ("product", product), ("doc_type", doc_type)]
+        for k, v in [
+            ("vendor", vendor),
+            ("product", product),
+            ("doc_type", doc_type),
+            ("version", version),
+        ]
         if v
     )
     log.info("search_docs query=%r  filters: %s", query, filter_desc or "none")
@@ -281,7 +292,7 @@ async def search_docs(
                 hits = qdrant.search(
                     collection_name=COLLECTION_NAME,
                     query_vector=query_vector,
-                    query_filter=build_filter(vendor, product, doc_type),
+                    query_filter=build_filter(vendor, product, doc_type, version),
                     limit=TOP_K,
                 )
             except UnexpectedResponse as exc:

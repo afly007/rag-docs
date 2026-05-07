@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -58,7 +59,16 @@ def generate_sidecar(pdf_path: Path) -> dict:
     )
 
     raw = json.loads(resp.choices[0].message.content)
-    return {k: str(v).lower() for k, v in raw.items() if v is not None}
+    result = {}
+    for k, v in raw.items():
+        if v is None:
+            continue
+        s = str(v).lower()
+        if k == "version":
+            # Strip placeholder segments like .xxxx or .x from template PDFs
+            s = re.sub(r"(\.[xX]+)+$", "", s)
+        result[k] = s
+    return result
 
 
 def main():
