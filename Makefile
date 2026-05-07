@@ -24,6 +24,10 @@ logs:
 build:
 	$(COMPOSE) build mcp-server ingest
 
+## Generate draft JSON sidecars for PDFs (review before ingesting)
+gen-sidecars:
+	$(INGEST_COMPOSE) run --rm --entrypoint python ingest gen_sidecar.py $(ARGS)
+
 ## Ingest new PDFs in ./docs (skips already-ingested)
 ingest:
 	$(INGEST_COMPOSE) run --rm ingest $(ARGS)
