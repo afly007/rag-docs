@@ -35,8 +35,8 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes a `
 | `mcp-server` | `./mcp-server` | FastMCP over SSE — exposes `search_docs` tool, stats dashboard, query log |
 | `ingest` | `./ingest` | One-shot PDF ingestion (run manually, profile-gated) |
 
-**Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)  
-**Chunking:** ~750 tokens per chunk, 100-token overlap, per page  
+**Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)
+**Chunking:** ~750 tokens per chunk, 100-token overlap, per page
 **Persistent volumes:** `qdrant_data` (vectors), `mcp_data` (query log SQLite DB)
 
 ---
@@ -60,7 +60,8 @@ cp .env.example .env
 Edit `.env`:
 ```
 OPENAI_API_KEY=sk-...
-COLLECTION_NAME=network_docs   # optional — change to namespace multiple doc sets
+COLLECTION_NAME=network_docs        # optional — change to namespace multiple doc sets
+IMAGE_BASE=ghcr.io/afly007/rag-docs # required for docker compose pull to resolve GHCR images
 ```
 
 ### 2. Start Qdrant and MCP server
@@ -296,6 +297,78 @@ docker compose up -d mcp-server
 ```bash
 curl http://localhost:6333/collections/network_docs
 ```
+
+---
+
+## Makefile shortcuts
+
+Most common operations are wrapped in `make` targets:
+
+```bash
+make up              # docker compose up -d
+make down            # docker compose down
+make restart         # rebuild and restart mcp-server only
+make logs            # tail mcp-server logs
+make build           # build both images locally
+make ingest          # ingest new PDFs (skips already-ingested)
+make ingest-force    # re-ingest all PDFs
+make stats           # open stats page in browser (macOS)
+```
+
+Pass extra args to ingest via `ARGS`:
+```bash
+make ingest ARGS="/docs/cisco-ios-xe-17.pdf"
+```
+
+---
+
+## CI/CD
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| CI | Every PR + push to `main` | ruff lint + format check, Docker build (no push) |
+| Release | Push to `main`, `v*` tags, manual | Builds and pushes images to GHCR |
+
+**GHCR images:**
+```
+ghcr.io/afly007/rag-docs/mcp-server:latest
+ghcr.io/afly007/rag-docs/mcp-server:v1.0.0   # on tagged releases
+ghcr.io/afly007/rag-docs/ingest:latest
+```
+
+Images are public — no login required to pull.
+
+**Automated deploy** requires secrets configured in repo Settings → Secrets → Actions: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN`. Until then, deploy manually:
+
+```bash
+cd ~/rag-docs
+docker compose pull mcp-server
+docker compose up -d mcp-server
+```
+
+---
+
+## Development
+
+**Prerequisites:** Python 3.12+, [pipx](https://pipx.pypa.io/), Docker
+
+```bash
+# Install pre-commit hooks (runs ruff on every commit)
+make pre-commit-install   # requires: sudo apt install pipx && pipx ensurepath
+```
+
+All changes go through pull requests — direct pushes to `main` are blocked. The CI workflow must pass (lint + build) before merging.
+
+```bash
+git checkout -b feat/your-feature
+# make changes
+ruff check --fix . && ruff format .   # fix lint before committing
+git add <files> && git commit -m "feat: description"
+git push -u origin feat/your-feature
+gh pr create --title "..." --body "..."
+```
+
+ruff is configured in `pyproject.toml` (`line-length=100`, Python 3.12, rules E/F/W/I/UP).
 
 ---
 
