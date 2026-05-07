@@ -13,7 +13,15 @@ from mcp.server.fastmcp import FastMCP
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import FieldCondition, Filter, Fusion, MatchValue, Prefetch, SparseVector
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    Fusion,
+    FusionQuery,
+    MatchValue,
+    Prefetch,
+    SparseVector,
+)
 from starlette.responses import HTMLResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -305,7 +313,7 @@ async def search_docs(
                         Prefetch(query=query_vector, using="dense", limit=PREFETCH_K),
                         Prefetch(query=compute_sparse(query), using="bm25", limit=PREFETCH_K),
                     ],
-                    query=Fusion.RRF,
+                    query=FusionQuery(fusion=Fusion.RRF),
                     query_filter=build_filter(vendor, product, doc_type, version),
                     limit=TOP_K,
                     with_payload=True,
