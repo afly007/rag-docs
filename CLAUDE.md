@@ -40,18 +40,6 @@ Makefile                 — Common tasks (see `make help`)
 
 ## Critical constraints
 
-### httpx pin — do not relax without upgrading openai
-
-```
-# mcp-server/requirements.txt and ingest/requirements.txt
-httpx<0.28.0
-openai==1.54.0
-```
-
-`openai 1.54.0` passes a `proxies` kwarg to httpx internally. httpx removed that argument in `0.28.0`, crashing both containers at startup with `TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies'`. The pin must stay at `<0.28.0` until openai is upgraded to 2.x.
-
-**Planned next work:** migrate to `openai>=2.0` which drops the proxies kwarg and is compatible with current httpx. This requires changes to both `ingest.py` and `server.py`.
-
 ### mcp-remote requires --allow-http
 
 The Claude Desktop config must include `--allow-http` in the args array or mcp-remote will refuse non-HTTPS non-localhost URLs:
@@ -151,7 +139,6 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies'` | httpx≥0.28 installed | Pin `httpx<0.28.0` |
 | `Tool result could not be submitted` in Claude | Sync OpenAI client blocked event loop | Use `AsyncOpenAI`, never `OpenAI` |
 | `sqlite3.OperationalError: no such column: vendor` | Old DB schema on persistent volume | Migration in `init_db()` adds missing cols |
 | `unsupported format string passed to NoneType.__format__` | `dict.get(key, default)` returns `None` when key exists with None value | Use `value or '—'` not `dict.get(key, '—')` |
@@ -190,7 +177,7 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 
 | Priority | Feature | Notes |
 |---|---|---|
-| 1 | **openai 1→2 migration** | Breaking rewrite of the Python SDK. Unblocks the `httpx<0.28.0` pin. Both `ingest.py` and `server.py` need changes. Test carefully before deploying. |
+| 1 | ~~**openai 1→2 migration**~~ | ✅ Done — upgraded to `openai==2.36.0`, removed `httpx<0.28.0` pin. No code changes needed; our embeddings + chat completions usage is identical in 2.x. |
 | 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
 | 3 | ~~**SSE keepalive**~~ | ✅ Done — `functools.partial(EventSourceResponse, ping=30)` injected before `sse_app()`. Sends SSE comment pings every 30s to reset router idle timers. |
 | 4 | ~~**PR #3**~~ (`docker/build-push-action 5→7`) | ✅ Merged. |
