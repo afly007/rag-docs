@@ -21,6 +21,9 @@ services:
       - QDRANT_PORT=6333
       - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
       - DB_PATH=/data/queries.db
+      - RERANKER=${RERANKER:-}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+      - RERANKER_CACHE_DIR=/data/reranker-cache
     volumes:
       - mcp_data:/data
     depends_on:
