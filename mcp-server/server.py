@@ -195,6 +195,48 @@ async def list_docs() -> str:
     return "\n".join(lines)
 
 
+def _fetch_adjacent_text(source: str, chunk_index: int) -> tuple[str | None, str | None]:
+    """Return (prev_text, next_text) for the neighbouring chunks in the same document."""
+    prev_text = next_text = None
+    for offset, slot in ((-1, "prev"), (1, "next")):
+        target_idx = chunk_index + offset
+        if target_idx < 0:
+            continue
+        try:
+            results, _ = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="source", match=MatchValue(value=source)),
+                        FieldCondition(key="chunk_index", match=MatchValue(value=target_idx)),
+                    ]
+                ),
+                limit=1,
+                with_vectors=False,
+                with_payload=["text"],
+            )
+            if results:
+                text = results[0].payload.get("text", "")
+                if slot == "prev":
+                    prev_text = text
+                else:
+                    next_text = text
+        except Exception:
+            pass
+    return prev_text, next_text
+
+
+def _build_context_block(match_text: str, prev_text: str | None, next_text: str | None) -> str:
+    """Wrap the matched chunk with optional preceding/following context."""
+    parts = []
+    if prev_text:
+        parts.append(f"[preceding context]\n{prev_text.strip()}")
+    parts.append(f"[matched section]\n{match_text.strip()}")
+    if next_text:
+        parts.append(f"[following context]\n{next_text.strip()}")
+    return "\n\n".join(parts)
+
+
 @mcp.tool()
 async def search_docs(
     query: str,
@@ -291,7 +333,15 @@ async def search_docs(
         header = f"[{i}] {p['source']}  |  page {p['page']}  |  score {hit.score:.3f}"
         if meta_parts:
             header += f"  |  {meta_parts}"
-        sections.append(f"{header}\n{p['text'].strip()}")
+
+        chunk_idx = p.get("chunk_index")
+        if chunk_idx is not None:
+            prev_text, next_text = _fetch_adjacent_text(p["source"], chunk_idx)
+        else:
+            prev_text = next_text = None
+
+        body = _build_context_block(p["text"], prev_text, next_text)
+        sections.append(f"{header}\n{body}")
 
     return "\n\n---\n\n".join(sections)
 
