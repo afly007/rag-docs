@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 env:
@@ -29,14 +30,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve image tags
+        id: tags
+        run: |
+          BASE="${{ env.IMAGE_BASE }}"
+          SHA="${{ github.sha }}"
+          REF="${{ github.ref }}"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            VERSION="${REF#refs/tags/}"
+            echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${VERSION},${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${VERSION},${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push mcp-server
         uses: docker/build-push-action@v5
         with:
           context: ./mcp-server
           push: true
-          tags: |
-            ${{ env.IMAGE_BASE }}/mcp-server:latest
-            ${{ env.IMAGE_BASE }}/mcp-server:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.mcp_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -45,9 +59,7 @@ jobs:
         with:
           context: ./ingest
           push: true
-          tags: |
-            ${{ env.IMAGE_BASE }}/ingest:latest
-            ${{ env.IMAGE_BASE }}/ingest:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.ingest_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
