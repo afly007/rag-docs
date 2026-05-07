@@ -167,7 +167,23 @@ Changing the model requires:
 
 ## Pending work
 
-- **openai 1→2 migration** — breaking rewrite; requires careful testing. Unblocks `httpx<0.28.0` constraint.
-- **Deploy secrets** — configure `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN` in repo Settings → Secrets → Actions to enable automated SSH deploy on merge to main.
-- **PR #3** (`docker/build-push-action 5→7`) — requires `workflow` OAuth scope to merge; do it in the browser.
-- **SSE keepalive** — SSE connections drop after ~6 minutes of inactivity; investigate uvicorn keepalive or mcp 1.27 ping settings.
+Priority-ordered. Items marked **quality** improve search results; **infra** are maintenance/reliability.
+
+### Quality improvements
+
+| Priority | Feature | Notes |
+|---|---|---|
+| 1 | **Hybrid search** (BM25 + dense vector) | Biggest remaining quality jump. Exact CLI command names don't embed well — BM25 matches them precisely. Qdrant supports sparse+dense natively via `SparseVectorParams` and `models.SparseVector`. Retrieve with both, fuse scores. Requires adding a sparse vector field at ingest time. |
+| 2 | **Auto-sidecar generation** | LLM reads the first N pages of each PDF, extracts vendor/product/version/doc_type, writes a draft `.json` sidecar for review before ingest. Removes the manual tagging friction as doc count grows. |
+| 3 | **Re-ranking** | Retrieve top-20 from Qdrant, re-rank to top-5 with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2` runs locally; Cohere Rerank API is the cloud alternative). Meaningful precision improvement when multiple docs cover the same topic. |
+| 4 | **Section-aware chunking** | PyMuPDF exposes the TOC and heading levels. Chunk at section boundaries instead of fixed token count so a 750-token chunk doesn't split mid-table or mid-example. Best implemented after hybrid search is in place. |
+| 5 | **Auto-ingest watch** | `inotifywait` loop in the ingest container watches `/docs` for new `.pdf` files and ingests automatically on drop. Low effort, good quality of life. |
+
+### Infrastructure
+
+| Priority | Feature | Notes |
+|---|---|---|
+| 1 | **openai 1→2 migration** | Breaking rewrite of the Python SDK. Unblocks the `httpx<0.28.0` pin. Both `ingest.py` and `server.py` need changes. Test carefully before deploying. |
+| 2 | **Deploy secrets** | Configure `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN` in repo Settings → Secrets → Actions. Closes the CI/CD loop so merges to main auto-deploy. |
+| 3 | **SSE keepalive** | Connections drop after ~6 min of idle (router/firewall kills TCP). Investigate uvicorn `ws_ping_interval` or mcp 1.27 SSE ping settings. Workaround: start a fresh Claude conversation. |
+| 4 | **PR #3** (`docker/build-push-action 5→7`) | Requires `workflow` OAuth scope — merge in the browser at https://github.com/afly007/rag-docs/pull/3 |
