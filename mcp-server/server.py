@@ -97,6 +97,11 @@ def init_db():
                 latency_ms   INTEGER
             )
         """)
+        # Migrate: add columns absent from older schema versions
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(queries)")}
+        for col in ("vendor", "product", "doc_type"):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE queries ADD COLUMN {col} TEXT")
         conn.commit()
 
 
