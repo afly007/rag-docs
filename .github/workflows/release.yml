@@ -46,7 +46,7 @@ jobs:
           fi
 
       - name: Build and push mcp-server
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./mcp-server
           push: true
@@ -55,7 +55,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push ingest
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./ingest
           push: true
