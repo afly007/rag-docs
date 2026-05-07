@@ -76,5 +76,6 @@ jobs:
           git pull https://github.com/afly007/rag-docs.git main
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u afly007 --password-stdin
           docker compose pull
+          docker compose pull ingest
           docker compose up -d
           docker image prune -f
