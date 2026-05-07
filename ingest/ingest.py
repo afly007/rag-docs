@@ -93,24 +93,40 @@ def extract_pages(pdf_path: Path) -> list[tuple[int, str]]:
     return [(i + 1, page.get_text()) for i, page in enumerate(doc)]
 
 
-def chunk_page(text: str, source: str, page_num: int, meta: dict) -> list[dict]:
-    tokens = enc.encode(text)
+def chunk_document(pages: list[tuple[int, str]], source: str, meta: dict) -> list[dict]:
+    """Chunk the full document as a single token stream.
+
+    Spans page boundaries so CLI syntax that continues across pages stays in
+    the same chunk. Records which page each chunk starts on and a sequential
+    chunk_index used by the MCP server for context-window expansion.
+    """
+    all_tokens: list[int] = []
+    token_page: list[int] = []
+
+    for page_num, text in pages:
+        tokens = enc.encode(text)
+        all_tokens.extend(tokens)
+        token_page.extend([page_num] * len(tokens))
+
     chunks = []
     start = 0
-    while start < len(tokens):
-        end = min(start + CHUNK_SIZE, len(tokens))
-        chunk_text = enc.decode(tokens[start:end])
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{page_num}:{start}"))
+    chunk_idx = 0
+    while start < len(all_tokens):
+        end = min(start + CHUNK_SIZE, len(all_tokens))
+        chunk_text = enc.decode(all_tokens[start:end])
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{start}"))
         chunks.append(
             {
                 "id": chunk_id,
                 "text": chunk_text,
                 "source": source,
-                "page": page_num,
+                "page": token_page[start],
+                "chunk_index": chunk_idx,
                 **meta,
             }
         )
         start += CHUNK_SIZE - CHUNK_OVERLAP
+        chunk_idx += 1
     return chunks
 
 
@@ -158,9 +174,7 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
         print("  No extractable text — skipping.")
         return 0
 
-    all_chunks = []
-    for page_num, text in non_empty:
-        all_chunks.extend(chunk_page(text, pdf_path.name, page_num, meta))
+    all_chunks = chunk_document(non_empty, pdf_path.name, meta)
 
     num_batches = math.ceil(len(all_chunks) / EMBED_BATCH)
     print(
@@ -169,8 +183,8 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
 
     all_chunks = embed_chunks(all_chunks)
 
-    # Build payload: fixed fields + all metadata keys
-    payload_keys = {"text", "source", "page"} | set(meta.keys())
+    # Build payload: fixed fields + chunk_index + all metadata keys
+    payload_keys = {"text", "source", "page", "chunk_index"} | set(meta.keys())
     points = [
         PointStruct(
             id=c["id"],
