@@ -1,41 +1,42 @@
-import os
-import time
+import asyncio
 import logging
+import os
 import sqlite3
 import threading
-import asyncio
+import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.server.sse import SseServerTransport
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import Filter, FieldCondition, MatchValue
-from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 from starlette.applications import Starlette
-from starlette.routing import Mount, Route
 from starlette.responses import HTMLResponse
+from starlette.routing import Mount, Route
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
-QDRANT_HOST     = os.environ.get("QDRANT_HOST", "localhost")
-QDRANT_PORT     = int(os.environ.get("QDRANT_PORT", 6333))
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
-DB_PATH         = os.environ.get("DB_PATH", "/data/queries.db")
+DB_PATH = os.environ.get("DB_PATH", "/data/queries.db")
 EMBEDDING_MODEL = "text-embedding-3-small"
-TOP_K           = 5
-STATS_TTL       = 60
-GAP_THRESHOLD   = 0.50
-SEARCH_TIMEOUT  = 25
+TOP_K = 5
+STATS_TTL = 60
+GAP_THRESHOLD = 0.50
+SEARCH_TIMEOUT = 25
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────
+
 
 def connect_qdrant(retries: int = 10, delay: float = 2.0) -> QdrantClient:
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
@@ -53,24 +54,24 @@ def connect_qdrant(retries: int = 10, delay: float = 2.0) -> QdrantClient:
 def build_filter(vendor: str, product: str, doc_type: str) -> Filter | None:
     conditions = []
     if vendor:
-        conditions.append(FieldCondition(key="vendor",   match=MatchValue(value=vendor)))
+        conditions.append(FieldCondition(key="vendor", match=MatchValue(value=vendor)))
     if product:
-        conditions.append(FieldCondition(key="product",  match=MatchValue(value=product)))
+        conditions.append(FieldCondition(key="product", match=MatchValue(value=product)))
     if doc_type:
         conditions.append(FieldCondition(key="doc_type", match=MatchValue(value=doc_type)))
     return Filter(must=conditions) if conditions else None
 
 
 qdrant = connect_qdrant()
-mcp    = FastMCP("network-docs", host="0.0.0.0", port=8000)
+mcp = FastMCP("network-docs", host="0.0.0.0", port=8000)
 
 
 # ── Query log (SQLite) ────────────────────────────────────────────────────────
 
-_db_lock     = threading.Lock()
+_db_lock = threading.Lock()
 _active_lock = threading.Lock()
 _active: dict = {}
-_id_counter   = 0
+_id_counter = 0
 
 
 def _next_id() -> int:
@@ -102,18 +103,36 @@ def init_db():
         conn.commit()
 
 
-def log_query(query: str, vendor: str, product: str, doc_type: str,
-              top_score: float | None, result_count: int,
-              top_source: str | None, top_page: int | None, latency_ms: int):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+def log_query(
+    query: str,
+    vendor: str,
+    product: str,
+    doc_type: str,
+    top_score: float | None,
+    result_count: int,
+    top_source: str | None,
+    top_page: int | None,
+    latency_ms: int,
+):
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     try:
         with _db_lock, sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 "INSERT INTO queries "
                 "(ts, query, vendor, product, doc_type, top_score, result_count, top_source, top_page, latency_ms) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ts, query, vendor or None, product or None, doc_type or None,
-                 top_score, result_count, top_source, top_page, latency_ms),
+                (
+                    ts,
+                    query,
+                    vendor or None,
+                    product or None,
+                    doc_type or None,
+                    top_score,
+                    result_count,
+                    top_source,
+                    top_page,
+                    latency_ms,
+                ),
             )
             conn.commit()
     except Exception as exc:
@@ -126,6 +145,7 @@ def query_db(sql: str, params: tuple = ()) -> list[tuple]:
 
 
 # ── MCP tools ─────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 async def list_docs() -> str:
@@ -140,15 +160,15 @@ async def list_docs() -> str:
     if not stats["sources"]:
         return "No documents ingested yet."
 
-    vendors   = sorted({v for s in stats["sources"].values() if (v := s.get("vendor"))})
-    products  = sorted({v for s in stats["sources"].values() if (v := s.get("product"))})
+    vendors = sorted({v for s in stats["sources"].values() if (v := s.get("vendor"))})
+    products = sorted({v for s in stats["sources"].values() if (v := s.get("product"))})
     doc_types = sorted({v for s in stats["sources"].values() if (v := s.get("doc_type"))})
 
     lines = [
         f"Collection: {stats['collection']}",
         f"Documents:  {stats['total_docs']}   Chunks: {stats['total_chunks']:,}",
         "",
-        f"Available vendors:   {', '.join(vendors)  or '(none tagged)'}",
+        f"Available vendors:   {', '.join(vendors) or '(none tagged)'}",
         f"Available products:  {', '.join(products) or '(none tagged)'}",
         f"Available doc_types: {', '.join(doc_types) or '(none tagged)'}",
         "",
@@ -158,10 +178,10 @@ async def list_docs() -> str:
     for src, info in sorted(stats["sources"].items()):
         lines.append(
             f"{src:<45} "
-            f"{info.get('vendor','—'):<12} "
-            f"{info.get('product','—'):<12} "
-            f"{info.get('version','—'):<10} "
-            f"{info.get('doc_type','—'):<16} "
+            f"{info.get('vendor', '—'):<12} "
+            f"{info.get('product', '—'):<12} "
+            f"{info.get('version', '—'):<10} "
+            f"{info.get('doc_type', '—'):<16} "
             f"{info['chunks']:,}"
         )
 
@@ -192,17 +212,20 @@ async def search_docs(
         product:  Optional — filter to a specific product (e.g. "ios-xe", "junos").
         doc_type: Optional — filter by document type (e.g. "cli-reference", "config-guide").
     """
-    filter_desc = "  ".join(f"{k}={v}" for k, v in
-                            [("vendor", vendor), ("product", product), ("doc_type", doc_type)] if v)
+    filter_desc = "  ".join(
+        f"{k}={v}"
+        for k, v in [("vendor", vendor), ("product", product), ("doc_type", doc_type)]
+        if v
+    )
     log.info("search_docs query=%r  filters: %s", query, filter_desc or "none")
 
-    t0  = time.monotonic()
+    t0 = time.monotonic()
     qid = _next_id()
     with _active_lock:
         _active[qid] = {
-            "query":      query + (f"  [{filter_desc}]" if filter_desc else ""),
+            "query": query + (f"  [{filter_desc}]" if filter_desc else ""),
             "started_at": t0,
-            "started_ts": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+            "started_ts": datetime.now(UTC).strftime("%H:%M:%S UTC"),
         }
 
     try:
@@ -235,11 +258,19 @@ async def search_docs(
             return no_result_msg
 
         top = hits[0]
-        log_query(query, vendor, product, doc_type,
-                  round(top.score, 4), len(hits),
-                  top.payload.get("source"), top.payload.get("page"), latency_ms)
+        log_query(
+            query,
+            vendor,
+            product,
+            doc_type,
+            round(top.score, 4),
+            len(hits),
+            top.payload.get("source"),
+            top.payload.get("page"),
+            latency_ms,
+        )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         latency_ms = int((time.monotonic() - t0) * 1000)
         log.error("search_docs timed out after %dms for query=%r", latency_ms, query)
         log_query(query, vendor, product, doc_type, None, 0, None, None, latency_ms)
@@ -291,7 +322,7 @@ def collect_qdrant_stats() -> dict:
             with_payload=META_FIELDS,
         )
         for point in results:
-            p   = point.payload
+            p = point.payload
             src = p.get("source", "unknown")
             sources[src]["chunks"] += 1
             sources[src]["pages"].add(p.get("page", 0))
@@ -302,24 +333,24 @@ def collect_qdrant_stats() -> dict:
             break
 
     data = {
-        "collection":   COLLECTION_NAME,
+        "collection": COLLECTION_NAME,
         "total_chunks": total_chunks,
-        "total_docs":   len(sources),
+        "total_docs": len(sources),
         "sources": {
             src: {
-                "chunks":   v["chunks"],
-                "pages":    len(v["pages"]),
-                "vendor":   v.get("vendor"),
-                "product":  v.get("product"),
-                "version":  v.get("version"),
+                "chunks": v["chunks"],
+                "pages": len(v["pages"]),
+                "vendor": v.get("vendor"),
+                "product": v.get("product"),
+                "version": v.get("version"),
                 "doc_type": v.get("doc_type"),
             }
             for src, v in sorted(sources.items())
         },
-        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "updated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
     _qdrant_cache["data"] = data
-    _qdrant_cache["at"]   = now
+    _qdrant_cache["at"] = now
     return data
 
 
@@ -350,31 +381,36 @@ def _render_active_banner(active: dict) -> str:
         f'<span class="elapsed">{now - v["started_at"]:.1f}s</span>'
         f'<span class="aquery">"{v["query"]}"</span>'
         f' <span style="color:#8b949e;font-size:.75rem">started {v["started_ts"]}</span>'
-        f'</div>'
+        f"</div>"
         for v in active.values()
     )
     return (
         f'<div class="active-banner">'
         f'<div class="label"><span class="blink">&#9679;</span> '
-        f'{len(active)} query running{"" if len(active) == 1 else "s"} — refreshing every 3s</div>'
-        f'{rows}'
-        f'</div>'
+        f"{len(active)} query running{'' if len(active) == 1 else 's'} — refreshing every 3s</div>"
+        f"{rows}"
+        f"</div>"
     )
 
 
 def render_stats(qdrant_stats: dict, active: dict) -> str:
     if "error" in qdrant_stats:
-        return (f'<!DOCTYPE html><html><body style="font-family:monospace;background:#111;'
-                f'color:#f55;padding:2rem"><h2>Error</h2><pre>{qdrant_stats["error"]}</pre>'
-                f'</body></html>')
+        return (
+            f'<!DOCTYPE html><html><body style="font-family:monospace;background:#111;'
+            f'color:#f55;padding:2rem"><h2>Error</h2><pre>{qdrant_stats["error"]}</pre>'
+            f"</body></html>"
+        )
 
     refresh_interval = 3 if active else STATS_TTL
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     total_queries = query_db("SELECT COUNT(*) FROM queries")[0][0]
     queries_today = query_db("SELECT COUNT(*) FROM queries WHERE ts >= ?", (today,))[0][0]
-    avg_latency   = query_db("SELECT ROUND(AVG(latency_ms)) FROM queries")[0][0] or 0
-    avg_score     = query_db("SELECT ROUND(AVG(top_score),3) FROM queries WHERE top_score IS NOT NULL")[0][0] or 0
+    avg_latency = query_db("SELECT ROUND(AVG(latency_ms)) FROM queries")[0][0] or 0
+    avg_score = (
+        query_db("SELECT ROUND(AVG(top_score),3) FROM queries WHERE top_score IS NOT NULL")[0][0]
+        or 0
+    )
 
     recent_rows = query_db(
         "SELECT ts, query, vendor, product, top_score, result_count, top_source, top_page, latency_ms "
@@ -400,15 +436,15 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
         if not qdrant_stats["sources"]:
             return '<tr><td colspan="7" class="empty">No documents ingested yet</td></tr>'
         return "".join(
-            f'<tr>'
+            f"<tr>"
             f'<td class="src">{src}</td>'
-            f'<td>{tag(info.get("vendor"))}</td>'
-            f'<td>{tag(info.get("product"))}</td>'
-            f'<td>{tag(info.get("version"))}</td>'
-            f'<td>{tag(info.get("doc_type"))}</td>'
+            f"<td>{tag(info.get('vendor'))}</td>"
+            f"<td>{tag(info.get('product'))}</td>"
+            f"<td>{tag(info.get('version'))}</td>"
+            f"<td>{tag(info.get('doc_type'))}</td>"
             f'<td class="num">{info["pages"]}</td>'
             f'<td class="num">{info["chunks"]:,}</td>'
-            f'</tr>'
+            f"</tr>"
             for src, info in qdrant_stats["sources"].items()
         )
 
@@ -420,7 +456,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
             src_cell = f"{src} p.{pg}" if src else "—"
             filters = "  ".join(x for x in [v, p] if x) or "—"
             out.append(
-                f'<tr>'
+                f"<tr>"
                 f'<td class="ts">{ts}</td>'
                 f'<td class="qtext">{q}</td>'
                 f'<td style="font-size:.75rem;color:#8b949e">{filters}</td>'
@@ -428,7 +464,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
                 f'<td class="num">{rc if rc is not None else 0}</td>'
                 f'<td class="src">{src_cell}</td>'
                 f'<td class="num">{lat} ms</td>'
-                f'</tr>'
+                f"</tr>"
             )
         return "".join(out)
 
@@ -529,9 +565,9 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
   {_render_active_banner(active)}
 
   <div class="cards">
-    <div class="card"><div class="label">Collection</div><div class="value sm">{qdrant_stats['collection']}</div></div>
-    <div class="card"><div class="label">Documents</div><div class="value">{qdrant_stats['total_docs']}</div></div>
-    <div class="card"><div class="label">Total Chunks</div><div class="value">{qdrant_stats['total_chunks']:,}</div></div>
+    <div class="card"><div class="label">Collection</div><div class="value sm">{qdrant_stats["collection"]}</div></div>
+    <div class="card"><div class="label">Documents</div><div class="value">{qdrant_stats["total_docs"]}</div></div>
+    <div class="card"><div class="label">Total Chunks</div><div class="value">{qdrant_stats["total_chunks"]:,}</div></div>
     <div class="card"><div class="label">Queries Today</div><div class="value">{queries_today:,}</div></div>
     <div class="card"><div class="label">Total Queries</div><div class="value">{total_queries:,}</div></div>
     <div class="card"><div class="label">Avg Latency</div><div class="value">{avg_latency}<span style="font-size:.9rem;color:#8b949e"> ms</span></div></div>
@@ -591,7 +627,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
 
   <p class="footer">
     <span class="dot"></span>Auto-refreshes every {STATS_TTL}s
-    &nbsp;·&nbsp; Doc index cached {qdrant_stats['updated_at']}
+    &nbsp;·&nbsp; Doc index cached {qdrant_stats["updated_at"]}
     &nbsp;·&nbsp; Score: <span style="color:#3fb950">≥0.70 good</span>
     <span style="color:#d29922"> ≥0.50 ok</span>
     <span style="color:#f85149"> &lt;0.50 gap</span>
@@ -608,6 +644,7 @@ async def stats_handler(request):
 
 # ── App assembly ──────────────────────────────────────────────────────────────
 
+
 async def main():
     init_db()
 
@@ -616,15 +653,16 @@ async def main():
     async def handle_sse(request):
         async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
             await mcp._mcp_server.run(
-                streams[0], streams[1],
+                streams[0],
+                streams[1],
                 mcp._mcp_server.create_initialization_options(),
             )
 
     app = Starlette(
         debug=mcp.settings.debug,
         routes=[
-            Route("/stats",     stats_handler),
-            Route("/sse",       handle_sse),
+            Route("/stats", stats_handler),
+            Route("/sse", handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
     )

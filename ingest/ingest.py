@@ -1,38 +1,45 @@
+import argparse
+import json
+import math
 import os
 import sys
-import uuid
-import json
-import argparse
-import math
 import time
+import uuid
 from pathlib import Path
 
 import fitz  # PyMuPDF
 import tiktoken
 from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 from tqdm import tqdm
 
-OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
-QDRANT_HOST     = os.environ.get("QDRANT_HOST", "localhost")
-QDRANT_PORT     = int(os.environ.get("QDRANT_PORT", 6333))
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
-DOCS_DIR        = Path(os.environ.get("DOCS_DIR", "/docs"))
+DOCS_DIR = Path(os.environ.get("DOCS_DIR", "/docs"))
 
 EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM   = 1536
-CHUNK_SIZE      = 750
-CHUNK_OVERLAP   = 100
-EMBED_BATCH     = 100
-UPSERT_BATCH    = 200
+EMBEDDING_DIM = 1536
+CHUNK_SIZE = 750
+CHUNK_OVERLAP = 100
+EMBED_BATCH = 100
+UPSERT_BATCH = 200
 
 # Recognised sidecar keys — any unknown keys are passed through as-is
 KNOWN_META_KEYS = {"vendor", "product", "version", "doc_type"}
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-qdrant        = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-enc           = tiktoken.get_encoding("cl100k_base")
+qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+enc = tiktoken.get_encoding("cl100k_base")
 
 
 def ensure_collection():
@@ -94,13 +101,15 @@ def chunk_page(text: str, source: str, page_num: int, meta: dict) -> list[dict]:
         end = min(start + CHUNK_SIZE, len(tokens))
         chunk_text = enc.decode(tokens[start:end])
         chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{page_num}:{start}"))
-        chunks.append({
-            "id":     chunk_id,
-            "text":   chunk_text,
-            "source": source,
-            "page":   page_num,
-            **meta,
-        })
+        chunks.append(
+            {
+                "id": chunk_id,
+                "text": chunk_text,
+                "source": source,
+                "page": page_num,
+                **meta,
+            }
+        )
         start += CHUNK_SIZE - CHUNK_OVERLAP
     return chunks
 
@@ -154,7 +163,9 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
         all_chunks.extend(chunk_page(text, pdf_path.name, page_num, meta))
 
     num_batches = math.ceil(len(all_chunks) / EMBED_BATCH)
-    print(f"Chunks: {len(all_chunks)}  ({num_batches} embedding batch{'es' if num_batches != 1 else ''})")
+    print(
+        f"Chunks: {len(all_chunks)}  ({num_batches} embedding batch{'es' if num_batches != 1 else ''})"
+    )
 
     all_chunks = embed_chunks(all_chunks)
 

@@ -36,9 +36,9 @@ ingest-force:
 stats:
 	open http://$(SERVER_IP):8000/stats
 
-## Install pre-commit hooks into local git
+## Install pre-commit hooks into local git (requires pipx: sudo apt install pipx)
 pre-commit-install:
-	pip install pre-commit && pre-commit install
+	pipx install pre-commit && pre-commit install
 
 ## Show available commands
 help:
