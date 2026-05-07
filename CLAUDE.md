@@ -36,6 +36,8 @@ Makefile                 — Common tasks (see `make help`)
 
 **Qdrant is the source of truth for duplicate detection.** `already_ingested()` scrolls Qdrant for the source filename rather than maintaining a separate manifest.
 
+**Re-ranking is opt-in via `RERANKER` env var.** `init_reranker()` is called in `main()` and sets the module-level `_reranker`. `rerank_hits()` is a no-op when `_reranker is None`. When enabled, `search_docs()` fetches `PREFETCH_K=20` candidates from Qdrant (instead of `TOP_K=5`) and the re-ranker picks the top 5. flashrank model names must match `Config.model_file_map` exactly — `ms-marco-MiniLM-L-12-v2` is correct; `ms-marco-MiniLM-L-6-v2` (from sentence-transformers) does not exist in flashrank and causes a 404 on model download.
+
 **Hybrid search uses BM25 sparse + dense vectors with RRF fusion.** Each chunk is stored with two vectors: a dense embedding (`text-embedding-3-small`) and a BM25 sparse vector built from tiktoken token frequencies with Qdrant server-side IDF. At query time, `query_points` runs both retrievers as `Prefetch` branches and fuses results with Reciprocal Rank Fusion. Use `FusionQuery(fusion=Fusion.RRF)` — NOT `Fusion.RRF` directly — as qdrant-client 1.17.1 serialises the bare enum as the string `"rrf"` which the REST API rejects with 400.
 
 ## Critical constraints
@@ -149,6 +151,7 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | Dependabot PRs failing lint | Our code had lint errors before Dependabot ran | Fix lint on `main` first, then `@dependabot rebase` |
 | Hybrid search returns 400 Bad Request | `Fusion.RRF` serialises as `"rrf"` (bare string) but API expects `{"fusion":"rrf"}` | Use `FusionQuery(fusion=Fusion.RRF)` in `query_points` call |
 | Collection migration required for hybrid search | Old collection has unnamed dense vector; hybrid needs named `dense` + sparse `bm25` | `curl -X DELETE http://localhost:6333/collections/network_docs` then `make ingest-force` |
+| `RERANKER=local` fails with 404 on model download | Wrong model name — flashrank model names differ from sentence-transformers | Use `ms-marco-MiniLM-L-12-v2` not `ms-marco-MiniLM-L-6-v2`; valid names are in `flashrank.Config.model_file_map` |
 
 ## Embedding model
 
@@ -169,7 +172,7 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 |---|---|---|
 | 1 | ~~**Hybrid search** (BM25 + dense vector)~~ | ✅ Done — shipped in v1.2.0. BM25 sparse vectors via tiktoken + Qdrant IDF, fused with RRF. |
 | 2 | ~~**Auto-sidecar generation**~~ | ✅ Done — `ingest/gen_sidecar.py` calls gpt-4o-mini on first 10 pages, writes draft `.json` sidecar. Run via `make gen-sidecars`. |
-| 3 | **Re-ranking** | Retrieve top-20 from Qdrant, re-rank to top-5 with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2` runs locally; Cohere Rerank API is the cloud alternative). Meaningful precision improvement when multiple docs cover the same topic. |
+| 3 | ~~**Re-ranking**~~ | ✅ Done — shipped in v1.3.0. `RERANKER=local` uses flashrank ms-marco-MiniLM-L-12-v2 (ONNX, ~22 MB, no PyTorch). `RERANKER=cohere` uses Cohere Rerank API. Off by default. |
 | 4 | **Section-aware chunking** | PyMuPDF exposes the TOC and heading levels. Chunk at section boundaries instead of fixed token count so a 750-token chunk doesn't split mid-table or mid-example. |
 | 5 | **Auto-ingest watch** | `inotifywait` loop in the ingest container watches `/docs` for new `.pdf` files and ingests automatically on drop. Low effort, good quality of life. |
 
@@ -177,7 +180,7 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 
 | Priority | Feature | Notes |
 |---|---|---|
-| 1 | ~~**openai 1→2 migration**~~ | ✅ Done — upgraded to `openai==2.36.0`, removed `httpx<0.28.0` pin. No code changes needed; our embeddings + chat completions usage is identical in 2.x. |
+| 1 | ~~**openai 1→2 migration**~~ | ✅ Done — upgraded to `openai==2.36.0`, removed `httpx<0.28.0` pin. No code changes needed; embeddings + chat completions API is identical in 2.x. |
 | 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
 | 3 | ~~**SSE keepalive**~~ | ✅ Done — `functools.partial(EventSourceResponse, ping=30)` injected before `sse_app()`. Sends SSE comment pings every 30s to reset router idle timers. |
 | 4 | ~~**PR #3**~~ (`docker/build-push-action 5→7`) | ✅ Merged. |

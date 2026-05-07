@@ -37,7 +37,7 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes `se
 | `ingest` | `./ingest` | One-shot PDF ingestion (run manually, profile-gated) |
 
 **Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)
-**Search:** Hybrid — dense vector + BM25 sparse (tiktoken TF · Qdrant IDF), fused with Reciprocal Rank Fusion
+**Search:** Hybrid — dense vector + BM25 sparse (tiktoken TF · Qdrant IDF), fused with Reciprocal Rank Fusion, optional cross-encoder re-ranking
 **Chunking:** ~750 tokens per chunk, 100-token overlap, spans page boundaries
 **Persistent volumes:** `qdrant_data` (vectors), `mcp_data` (query log SQLite DB)
 
@@ -141,6 +141,23 @@ Common `doc_type` values: `cli-reference`, `config-guide`, `design-guide`, `rele
 
 Without a sidecar the document is still ingested and searchable — metadata just won't be available for filtering. You can add sidecars later and re-ingest with `make ingest-force` to backfill.
 
+### Enabling re-ranking (optional)
+
+Re-ranking improves precision by running a cross-encoder over the top 20 retrieved chunks before returning the top 5. Set `RERANKER` in `.env`:
+
+```bash
+# Local cross-encoder — no API costs, ~22 MB model downloaded on first start
+RERANKER=local
+
+# Cohere Rerank API — requires API key, negligible latency
+RERANKER=cohere
+COHERE_API_KEY=...
+```
+
+Then restart: `docker compose up -d mcp-server`
+
+The local model (`ms-marco-MiniLM-L-12-v2`) is cached in the `mcp_data` volume and only downloaded once. Startup log will show `Local re-ranker ready` when active.
+
 ---
 
 ## Connecting Claude
@@ -233,6 +250,8 @@ search_docs("EVPN type-5 route", product="junos")
 search_docs("BGP community list", doc_type="cli-reference")
 search_docs("spanning-tree port-priority", version="10.16")
 ```
+
+**Re-ranking:** When `RERANKER=local` or `RERANKER=cohere` is set, `search_docs` fetches 20 candidates from Qdrant and a cross-encoder re-scores each (query, chunk) pair together before returning the top 5. More accurate than vector similarity alone for ambiguous queries.
 
 **Prompting tip:** Claude won't use MCP tools unless the question makes it obvious. Phrases like "search my network docs for…", "according to the AOS-CX documentation…", or "use the network-docs tool to look up…" reliably trigger tool calls.
 
@@ -346,7 +365,7 @@ make gen-sidecars ARGS="--force"   # overwrite existing sidecars
 **GHCR images:**
 ```
 ghcr.io/afly007/rag-docs/mcp-server:latest
-ghcr.io/afly007/rag-docs/mcp-server:v1.2.0   # pinned release tags
+ghcr.io/afly007/rag-docs/mcp-server:v1.3.0   # pinned release tags
 ghcr.io/afly007/rag-docs/ingest:latest
 ```
 
