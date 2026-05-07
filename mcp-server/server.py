@@ -9,14 +9,11 @@ from datetime import UTC, datetime
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import FieldCondition, Filter, MatchValue
-from starlette.applications import Starlette
 from starlette.responses import HTMLResponse
-from starlette.routing import Mount, Route
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -636,6 +633,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
 </html>"""
 
 
+@mcp.custom_route("/stats", methods=["GET"])
 async def stats_handler(request):
     with _active_lock:
         active_snapshot = dict(_active)
@@ -648,24 +646,7 @@ async def stats_handler(request):
 async def main():
     init_db()
 
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request):
-        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-            await mcp._mcp_server.run(
-                streams[0],
-                streams[1],
-                mcp._mcp_server.create_initialization_options(),
-            )
-
-    app = Starlette(
-        debug=mcp.settings.debug,
-        routes=[
-            Route("/stats", stats_handler),
-            Route("/sse", handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
+    app = mcp.sse_app()
 
     config = uvicorn.Config(
         app,
