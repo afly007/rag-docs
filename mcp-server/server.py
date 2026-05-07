@@ -180,10 +180,10 @@ async def list_docs() -> str:
     for src, info in sorted(stats["sources"].items()):
         lines.append(
             f"{src:<45} "
-            f"{info.get('vendor', '—'):<12} "
-            f"{info.get('product', '—'):<12} "
-            f"{info.get('version', '—'):<10} "
-            f"{info.get('doc_type', '—'):<16} "
+            f"{info.get('vendor') or '—':<12} "
+            f"{info.get('product') or '—':<12} "
+            f"{info.get('version') or '—':<10} "
+            f"{info.get('doc_type') or '—':<16} "
             f"{info['chunks']:,}"
         )
 
