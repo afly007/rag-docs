@@ -35,6 +35,8 @@ DB_PATH = os.environ.get("DB_PATH", "/data/queries.db")
 EMBEDDING_MODEL = "text-embedding-3-small"
 TOP_K = 5
 PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
+RERANKER = os.environ.get("RERANKER", "").lower()  # "local", "cohere", or ""
+RERANKER_CACHE_DIR = os.environ.get("RERANKER_CACHE_DIR", "/data/reranker-cache")
 STATS_TTL = 60
 GAP_THRESHOLD = 0.02  # RRF scores are much smaller than cosine scores
 SEARCH_TIMEOUT = 25
@@ -81,6 +83,57 @@ def build_filter(vendor: str, product: str, doc_type: str, version: str) -> Filt
 
 qdrant = connect_qdrant()
 mcp = FastMCP("network-docs", host="0.0.0.0", port=8000)
+
+# ── Re-ranker ─────────────────────────────────────────────────────────────────
+
+_reranker = None
+
+
+def init_reranker() -> None:
+    global _reranker
+    if RERANKER == "local":
+        from flashrank import Ranker
+
+        log.info("Loading local re-ranker (ms-marco-MiniLM-L-12-v2)…")
+        _reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=RERANKER_CACHE_DIR)
+        log.info("Local re-ranker ready")
+    elif RERANKER == "cohere":
+        import cohere
+
+        api_key = os.environ.get("COHERE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("RERANKER=cohere requires COHERE_API_KEY to be set")
+        _reranker = cohere.Client(api_key=api_key)
+        log.info("Cohere re-ranker configured")
+    else:
+        log.info(
+            "Re-ranking disabled (RERANKER=%r — set to 'local' or 'cohere' to enable)", RERANKER
+        )
+
+
+def rerank_hits(query: str, hits: list) -> list:
+    """Re-rank hits with the configured backend; returns hits[:TOP_K] in new order."""
+    if _reranker is None or not hits:
+        return hits[:TOP_K]
+
+    if RERANKER == "local":
+        from flashrank import RerankRequest
+
+        passages = [{"id": i, "text": h.payload["text"]} for i, h in enumerate(hits)]
+        results = _reranker.rerank(RerankRequest(query=query, passages=passages))
+        return [hits[r["id"]] for r in results[:TOP_K]]
+
+    if RERANKER == "cohere":
+        texts = [h.payload["text"] for h in hits]
+        resp = _reranker.rerank(
+            query=query,
+            documents=texts,
+            model="rerank-english-v3.0",
+            top_n=TOP_K,
+        )
+        return [hits[r.index] for r in resp.results]
+
+    return hits[:TOP_K]
 
 
 # ── Query log (SQLite) ────────────────────────────────────────────────────────
@@ -290,7 +343,12 @@ async def search_docs(
         ]
         if v
     )
-    log.info("search_docs query=%r  filters: %s", query, filter_desc or "none")
+    log.info(
+        "search_docs query=%r  filters: %s  reranker: %s",
+        query,
+        filter_desc or "none",
+        RERANKER or "off",
+    )
 
     t0 = time.monotonic()
     qid = _next_id()
@@ -306,6 +364,9 @@ async def search_docs(
             resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=query)
             query_vector = resp.data[0].embedding
 
+            # Fetch more candidates when re-ranking so the re-ranker has a
+            # larger pool to work with; without re-ranking fetch only TOP_K.
+            qdrant_limit = PREFETCH_K if _reranker else TOP_K
             try:
                 result = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
@@ -315,10 +376,10 @@ async def search_docs(
                     ],
                     query=FusionQuery(fusion=Fusion.RRF),
                     query_filter=build_filter(vendor, product, doc_type, version),
-                    limit=TOP_K,
+                    limit=qdrant_limit,
                     with_payload=True,
                 )
-                hits = result.points
+                hits = rerank_hits(query, result.points)
             except UnexpectedResponse as exc:
                 if "doesn't exist" in str(exc):
                     return "No documents have been ingested yet."
@@ -735,6 +796,7 @@ async def stats_handler(request):
 
 async def main():
     init_db()
+    init_reranker()
 
     # sse_starlette.EventSourceResponse supports a `ping` parameter that sends
     # SSE comment lines (": ping") to reset router/firewall idle-TCP timers.
