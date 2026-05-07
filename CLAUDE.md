@@ -155,7 +155,7 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | `unsupported format string passed to NoneType.__format__` | `dict.get(key, default)` returns `None` when key exists with None value | Use `value or '—'` not `dict.get(key, '—')` |
 | Stats page 500 on fresh deploy | Pre-existing `queries.db` missing new columns | Same — migration handles it |
 | `pull access denied` for GHCR | Package is private or wrong IMAGE_BASE | Make package public; set `IMAGE_BASE=ghcr.io/afly007/rag-docs` |
-| SSE `terminated: other side closed` after ~6 min idle | Router/firewall killing idle TCP connections | Start a fresh Claude conversation; persistent fix TBD |
+| SSE `terminated: other side closed` after ~6 min idle | Router/firewall killing idle TCP connections | Fixed — SSE ping=30s injected in `main()` before `sse_app()` |
 | `Received request before initialization was complete` | mcp-remote replayed tool calls on a new session before MCP handshake | Start a fresh Claude conversation |
 | Dependabot PRs failing lint | Our code had lint errors before Dependabot ran | Fix lint on `main` first, then `@dependabot rebase` |
 
@@ -188,5 +188,5 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 |---|---|---|
 | 1 | **openai 1→2 migration** | Breaking rewrite of the Python SDK. Unblocks the `httpx<0.28.0` pin. Both `ingest.py` and `server.py` need changes. Test carefully before deploying. |
 | 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
-| 3 | **SSE keepalive** | Connections drop after ~6 min of idle (router/firewall kills TCP). Investigate uvicorn `ws_ping_interval` or mcp 1.27 SSE ping settings. Workaround: start a fresh Claude conversation. |
+| 3 | ~~**SSE keepalive**~~ | ✅ Done — `functools.partial(EventSourceResponse, ping=30)` injected before `sse_app()`. Sends SSE comment pings every 30s to reset router idle timers. |
 | 4 | **PR #3** (`docker/build-push-action 5→7`) | Requires `workflow` OAuth scope — merge in the browser at https://github.com/afly007/rag-docs/pull/3 |
