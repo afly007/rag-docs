@@ -701,6 +701,17 @@ async def stats_handler(request):
 async def main():
     init_db()
 
+    # sse_starlette.EventSourceResponse supports a `ping` parameter that sends
+    # SSE comment lines (": ping") to reset router/firewall idle-TCP timers.
+    # mcp 1.27 constructs EventSourceResponse without ping, so we inject the
+    # default here before sse_app() builds the transport.
+    import functools
+
+    import mcp.server.sse as _mcp_sse
+    import sse_starlette
+
+    _mcp_sse.EventSourceResponse = functools.partial(sse_starlette.EventSourceResponse, ping=30)
+
     app = mcp.sse_app()
 
     config = uvicorn.Config(
