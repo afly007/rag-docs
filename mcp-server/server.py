@@ -7,12 +7,13 @@ import time
 from collections import defaultdict
 from datetime import UTC, datetime
 
+import tiktoken
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, Fusion, MatchValue, Prefetch, SparseVector
 from starlette.responses import HTMLResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -25,11 +26,20 @@ COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
 DB_PATH = os.environ.get("DB_PATH", "/data/queries.db")
 EMBEDDING_MODEL = "text-embedding-3-small"
 TOP_K = 5
+PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
 STATS_TTL = 60
-GAP_THRESHOLD = 0.50
+GAP_THRESHOLD = 0.02  # RRF scores are much smaller than cosine scores
 SEARCH_TIMEOUT = 25
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+enc = tiktoken.get_encoding("cl100k_base")
+
+
+def compute_sparse(text: str) -> SparseVector:
+    counts: dict[int, float] = {}
+    for tid in enc.encode(text):
+        counts[tid] = counts.get(tid, 0.0) + 1.0
+    return SparseVector(indices=list(counts), values=list(counts.values()))
 
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────
@@ -289,12 +299,18 @@ async def search_docs(
             query_vector = resp.data[0].embedding
 
             try:
-                hits = qdrant.search(
+                result = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
-                    query_vector=query_vector,
+                    prefetch=[
+                        Prefetch(query=query_vector, using="dense", limit=PREFETCH_K),
+                        Prefetch(query=compute_sparse(query), using="bm25", limit=PREFETCH_K),
+                    ],
+                    query=Fusion.RRF,
                     query_filter=build_filter(vendor, product, doc_type, version),
                     limit=TOP_K,
+                    with_payload=True,
                 )
+                hits = result.points
             except UnexpectedResponse as exc:
                 if "doesn't exist" in str(exc):
                     return "No documents have been ingested yet."
