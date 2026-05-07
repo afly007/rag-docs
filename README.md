@@ -1,6 +1,6 @@
 # Network Docs RAG
 
-A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes a `search_docs` tool via MCP server, allowing Claude to retrieve relevant CLI syntax, configuration examples, and design references mid-conversation.
+A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes `search_docs` and `list_docs` tools via MCP server, allowing Claude to retrieve relevant CLI syntax, configuration examples, and design references mid-conversation.
 
 ## Architecture
 
@@ -11,16 +11,17 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes a `
 │  ┌──────────┐      ┌──────────────────────────┐ │
 │  │  Qdrant  │◄─────│  MCP Server  :8000       │ │
 │  │  :6333   │      │  /sse  — search_docs()   │ │
-│  └──────────┘      │  /stats — dashboard      │ │
-│        ▲           └──────────────────────────┘ │
-│  ┌─────┴──────────────────────────┐             │
-│  │  Ingest (one-shot container)   │             │
-│  │  ./docs/*.pdf → chunks →       │             │
-│  │  embeddings → Qdrant           │             │
-│  └────────────────────────────────┘             │
+│  └──────────┘      │         list_docs()      │ │
+│        ▲           │  /stats — dashboard      │ │
+│  ┌─────┴──────────────────────────┐            │ │
+│  │  Ingest (one-shot container)   │            │ │
+│  │  ./docs/*.pdf → chunks →       │            │ │
+│  │  dense + BM25 vectors → Qdrant │            │ │
+│  └────────────────────────────────┘            │ │
+│                    └──────────────────────────┘ │
 └─────────────────────────────────────────────────┘
                     ▲
-          SSH tunnel / Tailscale / VPN
+          SSH tunnel / local network
                     │
        ┌────────────┴───────────────┐
        │  Claude Code  ~/.claude/   │
@@ -31,12 +32,13 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes a `
 **Components:**
 | Service | Image / Build | Purpose |
 |---|---|---|
-| `qdrant` | `qdrant/qdrant:latest` | Vector database — stores embeddings and full text |
-| `mcp-server` | `./mcp-server` | FastMCP over SSE — exposes `search_docs` tool, stats dashboard, query log |
+| `qdrant` | `qdrant/qdrant:latest` | Vector database — stores dense + sparse vectors and full text |
+| `mcp-server` | `./mcp-server` | FastMCP over SSE — exposes `search_docs` and `list_docs` tools, stats dashboard, query log |
 | `ingest` | `./ingest` | One-shot PDF ingestion (run manually, profile-gated) |
 
 **Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)
-**Chunking:** ~750 tokens per chunk, 100-token overlap, per page
+**Search:** Hybrid — dense vector + BM25 sparse (tiktoken TF · Qdrant IDF), fused with Reciprocal Rank Fusion
+**Chunking:** ~750 tokens per chunk, 100-token overlap, spans page boundaries
 **Persistent volumes:** `qdrant_data` (vectors), `mcp_data` (query log SQLite DB)
 
 ---
@@ -45,7 +47,7 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes a `
 
 - Docker + Docker Compose v2
 - OpenAI API key
-- Claude Code CLI and/or Claude desktop app (local machine)
+- Claude Code CLI and/or Claude Desktop app (local machine)
 
 ---
 
@@ -78,7 +80,7 @@ Copy vendor PDFs into `./docs/`, then run the ingest container:
 
 ```bash
 # ingest everything in ./docs/
-docker compose --profile ingest run --rm ingest
+make ingest
 
 # or target specific files
 docker compose --profile ingest run --rm ingest /docs/cisco-ios-xe-17.pdf
@@ -105,7 +107,17 @@ Ingestion is **idempotent** — re-running on the same file upserts identical ve
 
 ### Tagging documents with metadata
 
-For each PDF, create a sidecar `.json` file with the same base name in the same directory:
+#### Option A — Auto-generate sidecars (recommended)
+
+```bash
+make gen-sidecars
+```
+
+This calls gpt-4o-mini on the first 10 pages of each PDF to extract vendor, product, version, and doc_type, then writes a draft `.json` sidecar alongside each PDF. Review and edit the files before ingesting.
+
+#### Option B — Write sidecars manually
+
+For each PDF, create a sidecar `.json` with the same base name:
 
 ```
 docs/
@@ -127,7 +139,7 @@ Sidecar format (all fields optional):
 
 Common `doc_type` values: `cli-reference`, `config-guide`, `design-guide`, `release-notes`, `white-paper`
 
-Without a sidecar the document is still ingested and searchable — metadata just won't be available for filtering. You can add sidecars later and re-ingest with `--force` to backfill.
+Without a sidecar the document is still ingested and searchable — metadata just won't be available for filtering. You can add sidecars later and re-ingest with `make ingest-force` to backfill.
 
 ---
 
@@ -181,7 +193,7 @@ Two MCP tools are available:
 
 ### `list_docs()`
 
-Returns the full document catalog — vendors, products, versions, doc types, and chunk counts. Claude should call this first when it needs to know what's available or what filter values to use.
+Returns the full document catalog — vendors, products, versions, doc types, and chunk counts. Call this first to discover what filter values are available.
 
 ```
 You: What documentation do you have access to?
@@ -191,6 +203,7 @@ Claude: [calls list_docs()]
 
         Available vendors:   arista, cisco, juniper
         Available products:  eos, ios-xe, ios-xr, junos
+        Available versions:  17.9.1, 23.2R1
         Available doc_types: cli-reference, config-guide
 
         Document                                      Vendor    Product   Version  Doc Type        Chunks
@@ -200,27 +213,30 @@ Claude: [calls list_docs()]
         ...
 ```
 
-### `search_docs(query, vendor, product, doc_type)`
+### `search_docs(query, vendor, product, doc_type, version)`
 
-Searches the vector store and returns the top 5 matching chunks. All filter arguments are optional.
+Searches using hybrid retrieval (BM25 + dense vectors, RRF fused) and returns the top 5 matching chunks with surrounding context. All filter arguments are optional.
 
 ```
-You: How do I configure a BGP route reflector on IOS-XE?
+You: Search my network docs for how to configure LACP on AOS-CX
 
-Claude: [calls search_docs("BGP route reflector configuration", vendor="cisco", product="ios-xe")]
-        → returns top 5 chunks from Cisco IOS-XE docs only
+Claude: [calls search_docs("LACP link aggregation configuration", product="aos-cx")]
+        → returns top 5 chunks from AOS-CX docs
         → answers using exact CLI syntax from the vendor docs
 ```
 
-Without filters, all documents are searched:
+Filter examples:
 ```
 search_docs("OSPF area types comparison")
 search_docs("QoS DSCP marking policy-map", vendor="cisco")
 search_docs("EVPN type-5 route", product="junos")
 search_docs("BGP community list", doc_type="cli-reference")
+search_docs("spanning-tree port-priority", version="10.16")
 ```
 
-**Note:** Filtering only works on documents that were ingested with a sidecar `.json` file. Documents without metadata are always included in unfiltered searches.
+**Prompting tip:** Claude won't use MCP tools unless the question makes it obvious. Phrases like "search my network docs for…", "according to the AOS-CX documentation…", or "use the network-docs tool to look up…" reliably trigger tool calls.
+
+**Note:** Filtering only works on documents ingested with a sidecar `.json` file. Documents without metadata are always included in unfiltered searches.
 
 ---
 
@@ -234,13 +250,11 @@ Open `http://YOUR_SERVER_IP:8000/stats` in a browser. Auto-refreshes every 60 se
 
 | Section | What it shows |
 |---|---|
-| Ingested Documents | All ingested PDFs with page and chunk counts |
-| Recent Queries | Last 30 queries — time, text, score, source, latency |
-| Coverage Gaps | Queries scoring below 0.50 — grouped by query, sorted by frequency. These are topics missing from your corpus. |
+| Document Catalog | All ingested PDFs with vendor, product, version, page and chunk counts |
+| Recent Queries | Last 30 queries — time, text, filters, score, source, latency |
+| Coverage Gaps | Queries with low scores — topics likely missing from your corpus |
 | Most Referenced Sources | Which documents get retrieved most, with average relevance score |
 | Slowest Queries | Top 10 by latency — useful for spotting embed API bottlenecks |
-
-**Score legend:** green ≥ 0.70 (good match) · yellow ≥ 0.50 (ok) · red < 0.50 (gap)
 
 Every query is persisted to `/data/queries.db` (SQLite, WAL mode) inside the `mcp_data` Docker volume. The DB survives container restarts.
 
@@ -284,7 +298,7 @@ docker run --rm -v rag-docs_mcp_data:/data alpine \
 ### Delete and re-ingest a collection
 ```bash
 curl -X DELETE http://localhost:6333/collections/network_docs
-docker compose --profile ingest run --rm ingest
+make ingest-force
 ```
 
 ### Rebuild after code changes
@@ -302,8 +316,6 @@ curl http://localhost:6333/collections/network_docs
 
 ## Makefile shortcuts
 
-Most common operations are wrapped in `make` targets:
-
 ```bash
 make up              # docker compose up -d
 make down            # docker compose down
@@ -312,12 +324,14 @@ make logs            # tail mcp-server logs
 make build           # build both images locally
 make ingest          # ingest new PDFs (skips already-ingested)
 make ingest-force    # re-ingest all PDFs
+make gen-sidecars    # auto-generate JSON sidecars via gpt-4o-mini
 make stats           # open stats page in browser (macOS)
 ```
 
-Pass extra args to ingest via `ARGS`:
+Pass extra args via `ARGS`:
 ```bash
 make ingest ARGS="/docs/cisco-ios-xe-17.pdf"
+make gen-sidecars ARGS="--force"   # overwrite existing sidecars
 ```
 
 ---
@@ -327,18 +341,18 @@ make ingest ARGS="/docs/cisco-ios-xe-17.pdf"
 | Workflow | Trigger | What it does |
 |---|---|---|
 | CI | Every PR + push to `main` | ruff lint + format check, Docker build (no push) |
-| Release | Push to `main`, `v*` tags, manual | Builds and pushes images to GHCR |
+| Release | Push to `main` or `v*` tags | Builds and pushes images to GHCR, auto-deploys to server |
 
 **GHCR images:**
 ```
 ghcr.io/afly007/rag-docs/mcp-server:latest
-ghcr.io/afly007/rag-docs/mcp-server:v1.0.0   # on tagged releases
+ghcr.io/afly007/rag-docs/mcp-server:v1.2.0   # pinned release tags
 ghcr.io/afly007/rag-docs/ingest:latest
 ```
 
 Images are public — no login required to pull.
 
-**Automated deploy** requires secrets configured in repo Settings → Secrets → Actions: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN`. Until then, deploy manually:
+**Automated deploy:** merges to `main` trigger the release workflow, which builds and pushes new images to GHCR and then deploys via a self-hosted GitHub Actions runner on the server. Manual fallback:
 
 ```bash
 cd ~/rag-docs

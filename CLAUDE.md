@@ -36,6 +36,8 @@ Makefile                 — Common tasks (see `make help`)
 
 **Qdrant is the source of truth for duplicate detection.** `already_ingested()` scrolls Qdrant for the source filename rather than maintaining a separate manifest.
 
+**Hybrid search uses BM25 sparse + dense vectors with RRF fusion.** Each chunk is stored with two vectors: a dense embedding (`text-embedding-3-small`) and a BM25 sparse vector built from tiktoken token frequencies with Qdrant server-side IDF. At query time, `query_points` runs both retrievers as `Prefetch` branches and fuses results with Reciprocal Rank Fusion. Use `FusionQuery(fusion=Fusion.RRF)` — NOT `Fusion.RRF` directly — as qdrant-client 1.17.1 serialises the bare enum as the string `"rrf"` which the REST API rejects with 400.
+
 ## Critical constraints
 
 ### httpx pin — do not relax without upgrading openai
@@ -158,6 +160,8 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | SSE `terminated: other side closed` after ~6 min idle | Router/firewall killing idle TCP connections | Fixed — SSE ping=30s injected in `main()` before `sse_app()` |
 | `Received request before initialization was complete` | mcp-remote replayed tool calls on a new session before MCP handshake | Start a fresh Claude conversation |
 | Dependabot PRs failing lint | Our code had lint errors before Dependabot ran | Fix lint on `main` first, then `@dependabot rebase` |
+| Hybrid search returns 400 Bad Request | `Fusion.RRF` serialises as `"rrf"` (bare string) but API expects `{"fusion":"rrf"}` | Use `FusionQuery(fusion=Fusion.RRF)` in `query_points` call |
+| Collection migration required for hybrid search | Old collection has unnamed dense vector; hybrid needs named `dense` + sparse `bm25` | `curl -X DELETE http://localhost:6333/collections/network_docs` then `make ingest-force` |
 
 ## Embedding model
 
@@ -176,10 +180,10 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 
 | Priority | Feature | Notes |
 |---|---|---|
-| 1 | **Hybrid search** (BM25 + dense vector) | Biggest remaining quality jump. Exact CLI command names don't embed well — BM25 matches them precisely. Qdrant supports sparse+dense natively via `SparseVectorParams` and `models.SparseVector`. Retrieve with both, fuse scores. Requires adding a sparse vector field at ingest time. |
-| 2 | **Auto-sidecar generation** | LLM reads the first N pages of each PDF, extracts vendor/product/version/doc_type, writes a draft `.json` sidecar for review before ingest. Removes the manual tagging friction as doc count grows. |
+| 1 | ~~**Hybrid search** (BM25 + dense vector)~~ | ✅ Done — shipped in v1.2.0. BM25 sparse vectors via tiktoken + Qdrant IDF, fused with RRF. |
+| 2 | ~~**Auto-sidecar generation**~~ | ✅ Done — `ingest/gen_sidecar.py` calls gpt-4o-mini on first 10 pages, writes draft `.json` sidecar. Run via `make gen-sidecars`. |
 | 3 | **Re-ranking** | Retrieve top-20 from Qdrant, re-rank to top-5 with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2` runs locally; Cohere Rerank API is the cloud alternative). Meaningful precision improvement when multiple docs cover the same topic. |
-| 4 | **Section-aware chunking** | PyMuPDF exposes the TOC and heading levels. Chunk at section boundaries instead of fixed token count so a 750-token chunk doesn't split mid-table or mid-example. Best implemented after hybrid search is in place. |
+| 4 | **Section-aware chunking** | PyMuPDF exposes the TOC and heading levels. Chunk at section boundaries instead of fixed token count so a 750-token chunk doesn't split mid-table or mid-example. |
 | 5 | **Auto-ingest watch** | `inotifywait` loop in the ingest container watches `/docs` for new `.pdf` files and ingests automatically on drop. Low effort, good quality of life. |
 
 ### Infrastructure
@@ -189,4 +193,4 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 | 1 | **openai 1→2 migration** | Breaking rewrite of the Python SDK. Unblocks the `httpx<0.28.0` pin. Both `ingest.py` and `server.py` need changes. Test carefully before deploying. |
 | 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
 | 3 | ~~**SSE keepalive**~~ | ✅ Done — `functools.partial(EventSourceResponse, ping=30)` injected before `sse_app()`. Sends SSE comment pings every 30s to reset router idle timers. |
-| 4 | **PR #3** (`docker/build-push-action 5→7`) | Requires `workflow` OAuth scope — merge in the browser at https://github.com/afly007/rag-docs/pull/3 |
+| 4 | ~~**PR #3**~~ (`docker/build-push-action 5→7`) | ✅ Merged. |
