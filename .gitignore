@@ -1,0 +1,26 @@
+# Environment
+.env
+
+# PDFs and sidecar metadata — manage outside git, copy to server directly
+docs/**/*.pdf
+docs/**/*.json
+docs/*.pdf
+docs/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Docker volumes (local dev)
+qdrant_data/
+mcp_data/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp

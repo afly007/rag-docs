@@ -1,0 +1,26 @@
+version: 2
+
+updates:
+  # Python dependencies — ingest
+  - package-ecosystem: pip
+    directory: /ingest
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+
+  # Python dependencies — mcp-server
+  - package-ecosystem: pip
+    directory: /mcp-server
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]

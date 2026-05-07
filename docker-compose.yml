@@ -1,0 +1,47 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+
+  mcp-server:
+    build: ./mcp-server
+    image: ${IMAGE_BASE:-local}/mcp-server:${IMAGE_TAG:-latest}
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+      - DB_PATH=/data/queries.db
+    volumes:
+      - mcp_data:/data
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  ingest:
+    build: ./ingest
+    image: ${IMAGE_BASE:-local}/ingest:${IMAGE_TAG:-latest}
+    volumes:
+      - ./docs:/docs:ro
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+    depends_on:
+      - qdrant
+    profiles:
+      - ingest
+
+volumes:
+  qdrant_data:
+  mcp_data:

@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"ingest/ingest.py"    = ["T201"]   # allow print()
+"mcp-server/server.py" = ["T201"]
