@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 import tiktoken
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -130,18 +131,32 @@ def chunk_document(pages: list[tuple[int, str]], source: str, meta: dict) -> lis
     return chunks
 
 
+def _retry_after(exc: RateLimitError, default: float = 60.0) -> float:
+    """Parse the suggested wait time from an OpenAI rate-limit error message."""
+    match = re.search(r"try again in (\d+(?:\.\d+)?)(ms|s)", str(exc))
+    if match:
+        value, unit = float(match.group(1)), match.group(2)
+        return (value / 1000 if unit == "ms" else value) + 1.0
+    return default
+
+
 def embed_chunks(chunks: list[dict]) -> list[dict]:
     texts = [c["text"] for c in chunks]
     embeddings = []
     num_batches = math.ceil(len(texts) / EMBED_BATCH)
     with tqdm(total=num_batches, desc="  Embedding", unit="batch", leave=False) as pbar:
         for i in range(0, len(texts), EMBED_BATCH):
-            resp = openai_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts[i : i + EMBED_BATCH],
-            )
-            embeddings.extend(r.embedding for r in resp.data)
-            pbar.update(1)
+            batch = texts[i : i + EMBED_BATCH]
+            while True:
+                try:
+                    resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+                    embeddings.extend(r.embedding for r in resp.data)
+                    pbar.update(1)
+                    break
+                except RateLimitError as exc:
+                    wait = _retry_after(exc)
+                    tqdm.write(f"  Rate limit — retrying in {wait:.1f}s…")
+                    time.sleep(wait)
     for chunk, vec in zip(chunks, embeddings):
         chunk["vector"] = vec
     return chunks
