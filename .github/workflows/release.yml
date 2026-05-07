@@ -66,21 +66,15 @@ jobs:
   deploy:
     name: Deploy to server
     needs: push
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: SSH deploy
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host:     ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key:      ${{ secrets.DEPLOY_SSH_KEY }}
-          port:     22
-          script: |
-            cd ~/rag-docs
-            git pull https://github.com/afly007/rag-docs.git main
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u afly007 --password-stdin
-            docker compose pull
-            docker compose up -d
-            docker image prune -f
+      - name: Pull and restart
+        working-directory: /home/castrov/rag-docs
+        run: |
+          git pull https://github.com/afly007/rag-docs.git main
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u afly007 --password-stdin
+          docker compose pull
+          docker compose up -d
+          docker image prune -f
