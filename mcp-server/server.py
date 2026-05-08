@@ -716,6 +716,11 @@ def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
     positions = [m.start() for m in _CLIP_HEADING_RE.finditer(text)]
     sections: list[str] = []
     if positions:
+        # Capture any content before the first heading
+        if positions[0] > 0:
+            preamble = text[: positions[0]].strip()
+            if preamble:
+                sections.append(preamble)
         for i, pos in enumerate(positions):
             end = positions[i + 1] if i + 1 < len(positions) else len(text)
             body = text[pos:end].strip()
