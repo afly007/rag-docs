@@ -716,6 +716,11 @@ def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
     positions = [m.start() for m in _CLIP_HEADING_RE.finditer(text)]
     sections: list[str] = []
     if positions:
+        # Capture any content before the first heading
+        if positions[0] > 0:
+            preamble = text[: positions[0]].strip()
+            if preamble:
+                sections.append(preamble)
         for i, pos in enumerate(positions):
             end = positions[i + 1] if i + 1 < len(positions) else len(text)
             body = text[pos:end].strip()
@@ -745,6 +750,47 @@ def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
             start += _CLIP_CHUNK_SIZE - _CLIP_CHUNK_OVERLAP
             chunk_idx += 1
     return chunks
+
+
+@mcp.custom_route("/clip/meta", methods=["GET", "OPTIONS"])
+async def clip_meta_handler(request):
+    """Return distinct vendor and product values from the collection for the extension dropdowns."""
+    cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    }
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+
+    auth = request.headers.get("Authorization", "")
+    if CLIP_API_KEY and auth != f"Bearer {CLIP_API_KEY}":
+        return JSONResponse({"error": "Unauthorized"}, status_code=401, headers=cors)
+
+    vendors: set[str] = set()
+    products: set[str] = set()
+    offset = None
+    while True:
+        result = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=1000,
+            offset=offset,
+            with_payload=["vendor", "product"],
+            with_vectors=False,
+        )
+        for point in result[0]:
+            if v := point.payload.get("vendor"):
+                vendors.add(v)
+            if p := point.payload.get("product"):
+                products.add(p)
+        offset = result[1]
+        if offset is None:
+            break
+
+    return JSONResponse(
+        {"vendors": sorted(vendors), "products": sorted(products)},
+        headers=cors,
+    )
 
 
 @mcp.custom_route("/clip", methods=["POST", "OPTIONS"])

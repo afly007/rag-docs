@@ -13,11 +13,15 @@ Runs on a remote Ubuntu server with 750 GB RAM at `192.168.0.50`. The user is a 
 ```
 docker-compose.yml       — Qdrant + mcp-server + ingest (ingest is profile-gated)
 mcp-server/
-  server.py              — FastMCP SSE server, search_docs, list_docs, stats page, SQLite log
+  server.py              — FastMCP SSE server, search_docs, list_docs, stats page, SQLite log, /clip endpoint
   requirements.txt
 ingest/
   ingest.py              — PDF → chunks → embeddings → Qdrant
   requirements.txt
+browser-extension/
+  manifest.json          — MV3, permissions: activeTab, storage, tabs
+  popup.html/js          — One-click save UI; auto-rewrites reddit.com → old.reddit.com
+  options.html/js        — Server URL + API key settings; test connection button
 docs/                    — PDFs and JSON sidecars (gitignored, managed on server)
 scripts/deploy.sh        — Manual deploy helper
 pyproject.toml           — ruff config
@@ -41,6 +45,13 @@ Makefile                 — Common tasks (see `make help`)
 **Hybrid search uses BM25 sparse + dense vectors with RRF fusion.** Each chunk is stored with two vectors: a dense embedding (`text-embedding-3-small`) and a BM25 sparse vector built from tiktoken token frequencies with Qdrant server-side IDF. At query time, `query_points` runs both retrievers as `Prefetch` branches and fuses results with Reciprocal Rank Fusion. Use `FusionQuery(fusion=Fusion.RRF)` — NOT `Fusion.RRF` directly — as qdrant-client 1.17.1 serialises the bare enum as the string `"rrf"` which the REST API rejects with 400.
 
 **Section-aware chunking uses the PDF's TOC as split boundaries.** `extract_toc_sections()` calls `doc.get_toc(simple=False)` to get bookmark entries with y-coordinates, then computes end boundaries by scanning forward for the next entry at the same or higher level. Only leaf sections (`has_children=False`) are chunked — parent headings are skipped because their text appears in child sections. Sections below `MIN_SECTION_TOKENS=100` are merged forward into the next section. Large sections use the same 750/100 sliding window, scoped within the section. Chunk IDs are `uuid5(NAMESPACE_URL, f"{source}:{section_title}:{sub_chunk_n}")` — stable to page reflow, version-correct when titles change. New payload fields: `section_title`, `section_level`, `section_index`. Falls back to fixed-stride when `get_toc()` returns empty. `delete_source_chunks()` is called on `--force` re-ingest so orphaned old-ID chunks are removed before new ones are upserted. Run `scripts/test_section_detect.py <pdf>` inside the ingest container to inspect TOC quality without touching Qdrant or OpenAI.
+
+**Browser extension clip endpoint (`/clip` + `/clip/meta`).**
+- `POST /clip` — CORS-enabled, Bearer token auth (`CLIP_API_KEY`), fetches the URL server-side via `_clip_fetch()`, chunks with `_clip_chunk()`, embeds, and upserts as trust_tier=4 community content. trafilatura runs in a thread pool executor (sync library in async server). Three-pass extraction: (1) strict trafilatura, (2) lenient `favor_recall=True`, (3) raw HTML tag strip — returning `None` only if all three yield < 200 chars.
+- `GET /clip/meta` — scrolls full Qdrant collection (payload-only, no vectors) and returns sorted distinct `vendor` and `product` values for the extension's `<datalist>` dropdowns. Fast even on large collections since vectors are excluded.
+- `_clip_chunk()` splits on markdown headings first, then applies 750/100 sliding window per section. **Critical:** content before the first heading must be captured as a preamble section — if omitted, pages where a heading appears only near the end silently drop almost all content.
+- Reddit (`www.reddit.com`) serves JS-rendered HTML that trafilatura can't parse. The popup rewrites any `www.reddit.com`, `new.reddit.com`, or `sh.reddit.com` URL to `old.reddit.com` before POSTing to `/clip`. This is done client-side in popup.js — the server receives and fetches the `old.reddit.com` URL.
+- `chrome.tabs.create()` requires the explicit `"tabs"` permission in Firefox MV3, even when opening your own extension page via `chrome.runtime.getURL()`. Without it the call silently does nothing.
 
 **Watch mode polls DOCS_DIR every 30 seconds.** `watch_loop()` in `ingest.py` is triggered by `--watch`. It calls `already_ingested()` per file and catches per-file exceptions so a bad PDF doesn't kill the loop — it retries on the next cycle. The `ingest-watch` compose service (profile: `watch`) runs with `restart: unless-stopped`. Start with `make watch`, stop with `make watch-stop`.
 
@@ -156,6 +167,10 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | Hybrid search returns 400 Bad Request | `Fusion.RRF` serialises as `"rrf"` (bare string) but API expects `{"fusion":"rrf"}` | Use `FusionQuery(fusion=Fusion.RRF)` in `query_points` call |
 | Collection migration required for hybrid search | Old collection has unnamed dense vector; hybrid needs named `dense` + sparse `bm25` | `curl -X DELETE http://localhost:6333/collections/network_docs` then `make ingest-force` |
 | `RERANKER=local` fails with 404 on model download | Wrong model name — flashrank model names differ from sentence-transformers | Use `ms-marco-MiniLM-L-12-v2` not `ms-marco-MiniLM-L-6-v2`; valid names are in `flashrank.Config.model_file_map` |
+| Clip returns 1 chunk for most pages | `_clip_chunk()` heading path only captured text *from* headings, silently dropping all content before the first heading | Fixed — preamble section added before first heading; always verify with `docker exec mcp-server python3 -c "import trafilatura; ..."` |
+| Extension settings link does nothing in Firefox | `chrome.tabs.create()` silently fails without the `"tabs"` permission in Firefox MV3 | Add `"tabs"` to `permissions` array in `manifest.json` |
+| Clip returns "No extractable text" | Page is JS-rendered (React/Angular SPA) or has bot protection | Use three-pass fallback in `_clip_fetch()`; for true SPAs a headless browser would be required |
+| Reddit clips have near-empty content | `www.reddit.com` serves JS-rendered HTML | popup.js auto-rewrites to `old.reddit.com`; already-indexed bad clips must be deleted via Qdrant filter DELETE API |
 
 ## Embedding model
 
@@ -179,6 +194,7 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 | 3 | ~~**Re-ranking**~~ | ✅ Done — shipped in v1.3.0. `RERANKER=local` uses flashrank ms-marco-MiniLM-L-12-v2 (ONNX, ~22 MB, no PyTorch). `RERANKER=cohere` uses Cohere Rerank API. Off by default. |
 | 4 | ~~**Section-aware chunking**~~ | ✅ Done — `doc.get_toc(simple=False)` drives splits; leaf-only, merge-forward for short sections, 750/100 window within each section. New payload fields: `section_title`, `section_level`, `section_index`. Fallback to fixed-stride when no TOC. |
 | 5 | ~~**Auto-ingest watch**~~ | ✅ Done — `--watch` flag on `ingest.py` polls `DOCS_DIR` every 30s. `ingest-watch` compose service (profile: `watch`). `make watch` / `make watch-stop`. |
+| 6 | ~~**Browser extension clipper**~~ | ✅ Done — shipped in v1.5.0. MV3 extension in `browser-extension/`. One-click save any page to community tier. `/clip` endpoint on server. Auto-rewrites Reddit to `old.reddit.com`. Vendor/product dropdowns from `/clip/meta`. |
 
 ### Infrastructure
 
