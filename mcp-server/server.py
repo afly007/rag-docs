@@ -680,12 +680,35 @@ def _clip_fetch(url: str) -> str | None:
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
         return None
-    return trafilatura.extract(
+
+    text = trafilatura.extract(
         downloaded,
         include_tables=True,
         include_links=False,
         output_format="markdown",
     )
+    if text:
+        return text
+
+    # Fallback: lenient extraction (include everything trafilatura finds)
+    text = trafilatura.extract(
+        downloaded,
+        include_tables=True,
+        include_links=False,
+        include_comments=True,
+        no_fallback=False,
+        favor_recall=True,
+        output_format="markdown",
+    )
+    if text:
+        return text
+
+    # Last resort: strip HTML tags and return raw visible text
+    import re as _re
+
+    raw = _re.sub(r"<[^>]+>", " ", downloaded)
+    raw = _re.sub(r"[ \t]{2,}", " ", raw).strip()
+    return raw if len(raw) > 200 else None
 
 
 def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
