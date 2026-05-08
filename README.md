@@ -168,6 +168,22 @@ make ingest-web ARGS="/docs/community.json"
 
 These are stored as community-tier content and only surface when you explicitly ask for them.
 
+### Browser extension (one-click save from any webpage)
+
+The clipper extension lets you save any page you're reading directly to your RAG server — no manifest files, no copy-pasting URLs.
+
+**Setup:**
+
+1. Add `CLIP_API_KEY` to your `.env` (generate one with `openssl rand -hex 32`) and restart the server: `make restart`
+2. In Chrome/Edge, go to `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `browser-extension/` folder
+3. Click the extension icon, open **⚙ Settings**, enter your server URL and API key, click **Test connection**
+
+**Using it:**
+
+Browse to any page you want to save — a blog post, forum thread, or vendor article — click the extension icon, optionally tag it with a vendor and product, and click **Save to Network Docs**. The page is fetched, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
+
+Saved pages are immediately searchable via `search_community()`. They won't appear in `search_docs()` results (community content is always opt-in).
+
 ### Auto-ingest watch
 
 To ingest new files automatically as you drop them in:
@@ -292,6 +308,7 @@ cp .env.example .env
 | `RERANKER` | _(off)_ | `local` or `cohere` — improves result precision, see below |
 | `COHERE_API_KEY` | — | Required when `RERANKER=cohere` |
 | `TIER_BOOST_4` | `0.75` | Score penalty for community results (1.0 = disabled) |
+| `CLIP_API_KEY` | — | Secret key for the browser extension `/clip` endpoint — set to enable |
 
 ### Enabling re-ranking (optional)
 

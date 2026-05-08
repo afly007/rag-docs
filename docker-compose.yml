@@ -25,6 +25,7 @@ services:
       - COHERE_API_KEY=${COHERE_API_KEY:-}
       - RERANKER_CACHE_DIR=/data/reranker-cache
       - TIER_BOOST_4=${TIER_BOOST_4:-0.75}
+      - CLIP_API_KEY=${CLIP_API_KEY:-}
     volumes:
       - mcp_data:/data
     depends_on:
