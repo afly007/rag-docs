@@ -459,6 +459,21 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
     return len(points)
 
 
+def watch_loop(interval: int = 30) -> None:
+    """Poll DOCS_DIR every `interval` seconds and ingest any new PDFs."""
+    print(f"Watching {DOCS_DIR} for new PDFs (polling every {interval}s) …")
+    print("Drop a PDF into ./docs/ and it will be ingested automatically.\n")
+    ensure_collection()
+    while True:
+        for pdf in sorted(DOCS_DIR.glob("**/*.pdf")):
+            if not already_ingested(pdf.name):
+                try:
+                    ingest_pdf(pdf)
+                except Exception as exc:
+                    print(f"  Error ingesting {pdf.name}: {exc} — will retry next cycle")
+        time.sleep(interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ingest PDFs into Qdrant")
     parser.add_argument(
@@ -471,7 +486,16 @@ def main():
         action="store_true",
         help="Re-ingest files even if already present in the collection",
     )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch DOCS_DIR continuously and ingest new PDFs as they appear",
+    )
     args = parser.parse_args()
+
+    if args.watch:
+        watch_loop()
+        return
 
     ensure_collection()
 

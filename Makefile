@@ -1,4 +1,4 @@
-.PHONY: up down restart logs build ingest ingest-force stats pre-commit-install help
+.PHONY: up down restart logs build ingest ingest-force watch watch-stop stats pre-commit-install help
 
 COMPOSE         = docker compose
 INGEST_COMPOSE  = docker compose --profile ingest
@@ -35,6 +35,14 @@ ingest:
 ## Re-ingest all PDFs (overwrites existing chunks)
 ingest-force:
 	$(INGEST_COMPOSE) run --rm ingest --force $(ARGS)
+
+## Start continuous watch mode — auto-ingests new PDFs dropped into ./docs/
+watch:
+	docker compose --profile watch up -d ingest-watch
+
+## Stop the watch container
+watch-stop:
+	docker compose --profile watch stop ingest-watch
 
 ## Open stats page in browser (macOS)
 stats:

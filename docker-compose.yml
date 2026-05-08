@@ -46,6 +46,24 @@ services:
     profiles:
       - ingest
 
+  ingest-watch:
+    build: ./ingest
+    image: ${IMAGE_BASE:-local}/ingest:${IMAGE_TAG:-latest}
+    command: ["--watch"]
+    volumes:
+      - ./docs:/docs
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    profiles:
+      - watch
+
 volumes:
   qdrant_data:
   mcp_data:
