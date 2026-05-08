@@ -35,10 +35,11 @@ A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes `se
 | `qdrant` | `qdrant/qdrant:latest` | Vector database — stores dense + sparse vectors and full text |
 | `mcp-server` | `./mcp-server` | FastMCP over SSE — exposes `search_docs` and `list_docs` tools, stats dashboard, query log |
 | `ingest` | `./ingest` | One-shot PDF ingestion (run manually, profile-gated) |
+| `ingest-watch` | `./ingest` | Continuous watch mode — polls `./docs/` every 30s and ingests new PDFs automatically (profile-gated) |
 
 **Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)
 **Search:** Hybrid — dense vector + BM25 sparse (tiktoken TF · Qdrant IDF), fused with Reciprocal Rank Fusion, optional cross-encoder re-ranking
-**Chunking:** ~750 tokens per chunk, 100-token overlap, spans page boundaries
+**Chunking:** Section-aware — splits at PDF TOC boundaries so CLI blocks and tables stay intact; falls back to fixed 750-token stride for docs with no TOC
 **Persistent volumes:** `qdrant_data` (vectors), `mcp_data` (query log SQLite DB)
 
 ---
@@ -157,6 +158,23 @@ COHERE_API_KEY=...
 Then restart: `docker compose up -d mcp-server`
 
 The local model (`ms-marco-MiniLM-L-12-v2`) is cached in the `mcp_data` volume and only downloaded once. Startup log will show `Local re-ranker ready` when active.
+
+### Auto-ingest watch (optional)
+
+Instead of running `make ingest` manually after every PDF drop, start the watch container:
+
+```bash
+make watch
+```
+
+This starts `ingest-watch` in the background. It polls `./docs/` every 30 seconds and ingests any PDF not yet in the collection. Drop a file and it will be searchable within 30 seconds.
+
+```bash
+docker compose logs -f ingest-watch   # tail ingestion log
+make watch-stop                        # stop it
+```
+
+The watch container uses `restart: unless-stopped` so it survives server reboots as long as `make up` has been run once.
 
 ---
 
@@ -343,6 +361,8 @@ make logs            # tail mcp-server logs
 make build           # build both images locally
 make ingest          # ingest new PDFs (skips already-ingested)
 make ingest-force    # re-ingest all PDFs
+make watch           # start continuous watch mode (auto-ingest on PDF drop)
+make watch-stop      # stop the watch container
 make gen-sidecars    # auto-generate JSON sidecars via gpt-4o-mini
 make stats           # open stats page in browser (macOS)
 ```

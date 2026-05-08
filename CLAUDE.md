@@ -40,6 +40,10 @@ Makefile                 — Common tasks (see `make help`)
 
 **Hybrid search uses BM25 sparse + dense vectors with RRF fusion.** Each chunk is stored with two vectors: a dense embedding (`text-embedding-3-small`) and a BM25 sparse vector built from tiktoken token frequencies with Qdrant server-side IDF. At query time, `query_points` runs both retrievers as `Prefetch` branches and fuses results with Reciprocal Rank Fusion. Use `FusionQuery(fusion=Fusion.RRF)` — NOT `Fusion.RRF` directly — as qdrant-client 1.17.1 serialises the bare enum as the string `"rrf"` which the REST API rejects with 400.
 
+**Section-aware chunking uses the PDF's TOC as split boundaries.** `extract_toc_sections()` calls `doc.get_toc(simple=False)` to get bookmark entries with y-coordinates, then computes end boundaries by scanning forward for the next entry at the same or higher level. Only leaf sections (`has_children=False`) are chunked — parent headings are skipped because their text appears in child sections. Sections below `MIN_SECTION_TOKENS=100` are merged forward into the next section. Large sections use the same 750/100 sliding window, scoped within the section. Chunk IDs are `uuid5(NAMESPACE_URL, f"{source}:{section_title}:{sub_chunk_n}")` — stable to page reflow, version-correct when titles change. New payload fields: `section_title`, `section_level`, `section_index`. Falls back to fixed-stride when `get_toc()` returns empty. `delete_source_chunks()` is called on `--force` re-ingest so orphaned old-ID chunks are removed before new ones are upserted. Run `scripts/test_section_detect.py <pdf>` inside the ingest container to inspect TOC quality without touching Qdrant or OpenAI.
+
+**Watch mode polls DOCS_DIR every 30 seconds.** `watch_loop()` in `ingest.py` is triggered by `--watch`. It calls `already_ingested()` per file and catches per-file exceptions so a bad PDF doesn't kill the loop — it retries on the next cycle. The `ingest-watch` compose service (profile: `watch`) runs with `restart: unless-stopped`. Start with `make watch`, stop with `make watch-stop`.
+
 ## Critical constraints
 
 ### mcp-remote requires --allow-http
@@ -173,8 +177,8 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 | 1 | ~~**Hybrid search** (BM25 + dense vector)~~ | ✅ Done — shipped in v1.2.0. BM25 sparse vectors via tiktoken + Qdrant IDF, fused with RRF. |
 | 2 | ~~**Auto-sidecar generation**~~ | ✅ Done — `ingest/gen_sidecar.py` calls gpt-4o-mini on first 10 pages, writes draft `.json` sidecar. Run via `make gen-sidecars`. |
 | 3 | ~~**Re-ranking**~~ | ✅ Done — shipped in v1.3.0. `RERANKER=local` uses flashrank ms-marco-MiniLM-L-12-v2 (ONNX, ~22 MB, no PyTorch). `RERANKER=cohere` uses Cohere Rerank API. Off by default. |
-| 4 | **Section-aware chunking** | PyMuPDF exposes the TOC and heading levels. Chunk at section boundaries instead of fixed token count so a 750-token chunk doesn't split mid-table or mid-example. |
-| 5 | **Auto-ingest watch** | `inotifywait` loop in the ingest container watches `/docs` for new `.pdf` files and ingests automatically on drop. Low effort, good quality of life. |
+| 4 | ~~**Section-aware chunking**~~ | ✅ Done — `doc.get_toc(simple=False)` drives splits; leaf-only, merge-forward for short sections, 750/100 window within each section. New payload fields: `section_title`, `section_level`, `section_index`. Fallback to fixed-stride when no TOC. |
+| 5 | ~~**Auto-ingest watch**~~ | ✅ Done — `--watch` flag on `ingest.py` polls `DOCS_DIR` every 30s. `ingest-watch` compose service (profile: `watch`). `make watch` / `make watch-stop`. |
 
 ### Infrastructure
 
