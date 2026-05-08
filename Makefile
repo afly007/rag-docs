@@ -1,4 +1,4 @@
-.PHONY: up down restart logs build ingest ingest-force watch watch-stop stats pre-commit-install help
+.PHONY: up down restart logs build ingest ingest-force ingest-web backfill-tiers watch watch-stop stats pre-commit-install help
 
 COMPOSE         = docker compose
 INGEST_COMPOSE  = docker compose --profile ingest
@@ -35,6 +35,15 @@ ingest:
 ## Re-ingest all PDFs (overwrites existing chunks)
 ingest-force:
 	$(INGEST_COMPOSE) run --rm ingest --force $(ARGS)
+
+## Ingest web pages from a JSON manifest file into community tier (trust_tier=4)
+## Usage: make ingest-web ARGS="/docs/community.json"
+ingest-web:
+	$(INGEST_COMPOSE) run --rm --entrypoint python ingest ingest_web.py $(ARGS)
+
+## Backfill trust_tier=1 / source_type=vendor-doc on existing chunks missing these fields (run once after upgrading)
+backfill-tiers:
+	$(INGEST_COMPOSE) run --rm --entrypoint python ingest backfill_tiers.py
 
 ## Start continuous watch mode — auto-ingests new PDFs dropped into ./docs/
 watch:

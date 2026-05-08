@@ -37,12 +37,64 @@ TOP_K = 5
 PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
 RERANKER = os.environ.get("RERANKER", "").lower()  # "local", "cohere", or ""
 RERANKER_CACHE_DIR = os.environ.get("RERANKER_CACHE_DIR", "/data/reranker-cache")
+TIER_BOOST_4 = float(os.environ.get("TIER_BOOST_4", "0.75"))
 STATS_TTL = 60
 GAP_THRESHOLD = 0.02  # RRF scores are much smaller than cosine scores
 SEARCH_TIMEOUT = 25
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 enc = tiktoken.get_encoding("cl100k_base")
+
+_TIER_LABELS: dict[int, str] = {
+    1: "VENDOR-DOC",
+    2: "VALIDATED-DESIGN",
+    3: "INTERNAL",
+    4: "COMMUNITY",
+}
+
+_TIER_ADVISORIES: dict[int, str] = {
+    4: "community source — verify before acting",
+}
+
+
+def _tier_badge(tier: int | None) -> str:
+    if tier is None:
+        return ""
+    label = _TIER_LABELS.get(tier, f"tier-{tier}")
+    advisory = _TIER_ADVISORIES.get(tier, "")
+    badge = f"[{label} tier-{tier}]"
+    if advisory:
+        badge += f" — {advisory}"
+    return badge
+
+
+def _tier_preamble(hits: list) -> str | None:
+    tiers_seen: dict[int, int] = {}
+    for hit in hits:
+        tier = hit.payload.get("trust_tier") or 1
+        tiers_seen[tier] = tiers_seen.get(tier, 0) + 1
+    if len(tiers_seen) <= 1:
+        return None
+    parts = []
+    for tier in sorted(tiers_seen):
+        label = _TIER_LABELS.get(tier, f"tier-{tier}")
+        count = tiers_seen[tier]
+        advisory = f" ({_TIER_ADVISORIES[tier]})" if tier in _TIER_ADVISORIES else ""
+        parts.append(f"  {count}× {label} tier-{tier}{advisory}")
+    return "Results span multiple source tiers:\n" + "\n".join(parts)
+
+
+def apply_tier_boost(hits: list) -> list:
+    """Re-sort hits applying a score penalty to tier-4 community results."""
+    if TIER_BOOST_4 >= 1.0:
+        return hits
+
+    def boosted(hit):
+        if hit.payload.get("trust_tier") == 4:
+            return hit.score * TIER_BOOST_4
+        return hit.score
+
+    return sorted(hits, key=boosted, reverse=True)
 
 
 def compute_sparse(text: str) -> SparseVector:
@@ -68,7 +120,19 @@ def connect_qdrant(retries: int = 10, delay: float = 2.0) -> QdrantClient:
     raise RuntimeError("Could not connect to Qdrant after multiple retries")
 
 
-def build_filter(vendor: str, product: str, doc_type: str, version: str) -> Filter | None:
+def build_filter(
+    vendor: str,
+    product: str,
+    doc_type: str,
+    version: str,
+    source_type: str = "",
+    community: bool = False,
+) -> Filter:
+    """Build a Qdrant Filter.
+
+    By default excludes trust_tier=4 (community) content.
+    When community=True, restricts to ONLY trust_tier=4 content.
+    """
     conditions = []
     if vendor:
         conditions.append(FieldCondition(key="vendor", match=MatchValue(value=vendor)))
@@ -78,7 +142,17 @@ def build_filter(vendor: str, product: str, doc_type: str, version: str) -> Filt
         conditions.append(FieldCondition(key="doc_type", match=MatchValue(value=doc_type)))
     if version:
         conditions.append(FieldCondition(key="version", match=MatchValue(value=version)))
-    return Filter(must=conditions) if conditions else None
+    if source_type:
+        conditions.append(FieldCondition(key="source_type", match=MatchValue(value=source_type)))
+
+    if community:
+        conditions.append(FieldCondition(key="trust_tier", match=MatchValue(value=4)))
+        return Filter(must=conditions)
+
+    return Filter(
+        must=conditions,
+        must_not=[FieldCondition(key="trust_tier", match=MatchValue(value=4))],
+    )
 
 
 qdrant = connect_qdrant()
@@ -157,22 +231,23 @@ def init_db():
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS queries (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts           TEXT    NOT NULL,
-                query        TEXT    NOT NULL,
-                vendor       TEXT,
-                product      TEXT,
-                doc_type     TEXT,
-                top_score    REAL,
-                result_count INTEGER,
-                top_source   TEXT,
-                top_page     INTEGER,
-                latency_ms   INTEGER
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              TEXT    NOT NULL,
+                query           TEXT    NOT NULL,
+                vendor          TEXT,
+                product         TEXT,
+                doc_type        TEXT,
+                top_score       REAL,
+                result_count    INTEGER,
+                top_source      TEXT,
+                top_page        INTEGER,
+                latency_ms      INTEGER,
+                top_source_type TEXT
             )
         """)
         # Migrate: add columns absent from older schema versions
         existing = {row[1] for row in conn.execute("PRAGMA table_info(queries)")}
-        for col in ("vendor", "product", "doc_type"):
+        for col in ("vendor", "product", "doc_type", "top_source_type"):
             if col not in existing:
                 conn.execute(f"ALTER TABLE queries ADD COLUMN {col} TEXT")
         conn.commit()
@@ -188,14 +263,16 @@ def log_query(
     top_source: str | None,
     top_page: int | None,
     latency_ms: int,
+    top_source_type: str | None = None,
 ):
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     try:
         with _db_lock, sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 "INSERT INTO queries "
-                "(ts, query, vendor, product, doc_type, top_score, result_count, top_source, top_page, latency_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(ts, query, vendor, product, doc_type, top_score, result_count, "
+                "top_source, top_page, latency_ms, top_source_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     query,
@@ -207,6 +284,7 @@ def log_query(
                     top_source,
                     top_page,
                     latency_ms,
+                    top_source_type,
                 ),
             )
             conn.commit()
@@ -219,15 +297,38 @@ def query_db(sql: str, params: tuple = ()) -> list[tuple]:
         return conn.execute(sql, params).fetchall()
 
 
+# ── Shared search helper ───────────────────────────────────────────────────────
+
+
+async def _run_search(query: str, query_filter: Filter) -> list:
+    """Hybrid search + optional rerank. Returns up to TOP_K hits."""
+    resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=query)
+    query_vector = resp.data[0].embedding
+
+    qdrant_limit = PREFETCH_K if _reranker else TOP_K
+    result = qdrant.query_points(
+        collection_name=COLLECTION_NAME,
+        prefetch=[
+            Prefetch(query=query_vector, using="dense", limit=PREFETCH_K),
+            Prefetch(query=compute_sparse(query), using="bm25", limit=PREFETCH_K),
+        ],
+        query=FusionQuery(fusion=Fusion.RRF),
+        query_filter=query_filter,
+        limit=qdrant_limit,
+        with_payload=True,
+    )
+    return rerank_hits(query, result.points)
+
+
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
 async def list_docs() -> str:
     """
-    List all ingested documents with their metadata (vendor, product, version, doc_type)
-    and the filter values accepted by search_docs(). Call this first to discover what
-    is available before filtering a search.
+    List all ingested documents with their metadata (vendor, product, version, doc_type,
+    source_type, trust tier) and the filter values accepted by search_docs(). Call this
+    first to discover what is available before filtering a search.
     """
     stats = collect_qdrant_stats()
     if "error" in stats:
@@ -239,33 +340,41 @@ async def list_docs() -> str:
     products = sorted({v for s in stats["sources"].values() if (v := s.get("product"))})
     versions = sorted({v for s in stats["sources"].values() if (v := s.get("version"))})
     doc_types = sorted({v for s in stats["sources"].values() if (v := s.get("doc_type"))})
+    source_types = sorted({v for s in stats["sources"].values() if (v := s.get("source_type"))})
 
     lines = [
         f"Collection: {stats['collection']}",
         f"Documents:  {stats['total_docs']}   Chunks: {stats['total_chunks']:,}",
         "",
-        f"Available vendors:   {', '.join(vendors) or '(none tagged)'}",
-        f"Available products:  {', '.join(products) or '(none tagged)'}",
-        f"Available versions:  {', '.join(versions) or '(none tagged)'}",
-        f"Available doc_types: {', '.join(doc_types) or '(none tagged)'}",
+        f"Available vendors:      {', '.join(vendors) or '(none tagged)'}",
+        f"Available products:     {', '.join(products) or '(none tagged)'}",
+        f"Available versions:     {', '.join(versions) or '(none tagged)'}",
+        f"Available doc_types:    {', '.join(doc_types) or '(none tagged)'}",
+        f"Available source_types: {', '.join(source_types) or '(none tagged)'}",
         "",
-        f"{'Document':<45} {'Vendor':<12} {'Product':<12} {'Version':<10} {'Doc Type':<16} Chunks",
-        "─" * 110,
+        f"{'Document':<45} {'Vendor':<12} {'Product':<12} {'Version':<10} {'Doc Type':<18} {'Tier':<6} Chunks",
+        "─" * 118,
     ]
     for src, info in sorted(stats["sources"].items()):
+        tier = info.get("trust_tier")
+        tier_str = str(tier) if tier is not None else "—"
         lines.append(
             f"{src:<45} "
             f"{info.get('vendor') or '—':<12} "
             f"{info.get('product') or '—':<12} "
             f"{info.get('version') or '—':<10} "
-            f"{info.get('doc_type') or '—':<16} "
+            f"{info.get('doc_type') or '—':<18} "
+            f"{tier_str:<6} "
             f"{info['chunks']:,}"
         )
 
     lines += [
         "",
-        "Use search_docs(query, vendor=..., product=..., doc_type=..., version=...) to filter results.",
-        "Untagged documents are searched when no filter is specified.",
+        "Trust tiers: 1=vendor-doc (authoritative)  2=validated-design  3=internal  4=community",
+        "Community (tier-4) docs are excluded from search_docs() — use search_community() to query them.",
+        "",
+        "Use search_docs(query, vendor=..., product=..., doc_type=..., version=..., source_type=...) to filter.",
+        "Untagged documents are always included in unfiltered searches.",
     ]
     return "\n".join(lines)
 
@@ -319,19 +428,23 @@ async def search_docs(
     product: str = "",
     doc_type: str = "",
     version: str = "",
+    source_type: str = "",
 ) -> str:
     """
     Search ingested vendor documentation for the most relevant sections.
+    Covers vendor-official (tier 1), validated-design (tier 2), and internal (tier 3) content.
+    Community sources (tier 4) are excluded — use search_community() for those.
 
     Returns the top 5 matching chunks with source, page, relevance score, and text.
     Use list_docs() first to see available filter values.
 
     Args:
-        query:    What to search for.
-        vendor:   Optional — filter to a specific vendor (e.g. "cisco", "juniper").
-        product:  Optional — filter to a specific product (e.g. "ios-xe", "junos").
-        doc_type: Optional — filter by document type (e.g. "cli-reference", "config-guide").
-        version:  Optional — filter to a specific version (e.g. "10.16", "17.9.1").
+        query:       What to search for.
+        vendor:      Optional — filter to a specific vendor (e.g. "cisco", "juniper").
+        product:     Optional — filter to a specific product (e.g. "ios-xe", "junos").
+        doc_type:    Optional — filter by document type (e.g. "cli-reference", "validated-design").
+        version:     Optional — filter to a specific version (e.g. "10.16", "17.9.1").
+        source_type: Optional — filter by source type ("vendor-doc", "validated-design", "internal").
     """
     filter_desc = "  ".join(
         f"{k}={v}"
@@ -340,6 +453,7 @@ async def search_docs(
             ("product", product),
             ("doc_type", doc_type),
             ("version", version),
+            ("source_type", source_type),
         ]
         if v
     )
@@ -361,25 +475,12 @@ async def search_docs(
 
     try:
         async with asyncio.timeout(SEARCH_TIMEOUT):
-            resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=query)
-            query_vector = resp.data[0].embedding
-
-            # Fetch more candidates when re-ranking so the re-ranker has a
-            # larger pool to work with; without re-ranking fetch only TOP_K.
-            qdrant_limit = PREFETCH_K if _reranker else TOP_K
             try:
-                result = qdrant.query_points(
-                    collection_name=COLLECTION_NAME,
-                    prefetch=[
-                        Prefetch(query=query_vector, using="dense", limit=PREFETCH_K),
-                        Prefetch(query=compute_sparse(query), using="bm25", limit=PREFETCH_K),
-                    ],
-                    query=FusionQuery(fusion=Fusion.RRF),
-                    query_filter=build_filter(vendor, product, doc_type, version),
-                    limit=qdrant_limit,
-                    with_payload=True,
+                hits = await _run_search(
+                    query,
+                    build_filter(vendor, product, doc_type, version, source_type),
                 )
-                hits = rerank_hits(query, result.points)
+                hits = apply_tier_boost(hits)
             except UnexpectedResponse as exc:
                 if "doesn't exist" in str(exc):
                     return "No documents have been ingested yet."
@@ -389,7 +490,7 @@ async def search_docs(
 
         if not hits:
             no_result_msg = "No relevant documentation found."
-            if vendor or product or doc_type:
+            if vendor or product or doc_type or source_type:
                 no_result_msg += (
                     f" Filters applied: {filter_desc}. "
                     "Try calling list_docs() to verify filter values, or search without filters."
@@ -408,6 +509,7 @@ async def search_docs(
             top.payload.get("source"),
             top.payload.get("page"),
             latency_ms,
+            top_source_type=top.payload.get("source_type"),
         )
 
     except TimeoutError:
@@ -421,16 +523,24 @@ async def search_docs(
             _active.pop(qid, None)
 
     sections = []
+    preamble = _tier_preamble(hits)
+    if preamble:
+        sections.append(preamble)
+
     for i, hit in enumerate(hits, 1):
         p = hit.payload
         meta_parts = "  ".join(
             f"{k}={p[k]}" for k in ("vendor", "product", "version", "doc_type") if p.get(k)
         )
-        header = f"[{i}] {p['source']}  |  page {p['page']}  |  score {hit.score:.3f}"
+        header = f"[{i}] {p['source']}  |  page {p.get('page', '?')}  |  score {hit.score:.3f}"
         if meta_parts:
             header += f"  |  {meta_parts}"
         if section := p.get("section_title"):
             header += f"  |  §{section}"
+        if url := p.get("url"):
+            header += f"  |  {url}"
+        if badge := _tier_badge(p.get("trust_tier")):
+            header += f"  |  {badge}"
 
         chunk_idx = p.get("chunk_index")
         if chunk_idx is not None:
@@ -440,6 +550,114 @@ async def search_docs(
 
         body = _build_context_block(p["text"], prev_text, next_text)
         sections.append(f"{header}\n{body}")
+
+    return "\n\n---\n\n".join(sections)
+
+
+@mcp.tool()
+async def search_community(
+    query: str,
+    vendor: str = "",
+    product: str = "",
+    doc_type: str = "",
+) -> str:
+    """
+    Search community-sourced references (curated Reddit posts, blog articles, web pages).
+    These are tier-4 sources — useful for real-world context and peer experience,
+    but NOT authoritative. Always verify findings against vendor documentation before acting.
+
+    Requires community content to have been ingested via `make ingest-web`.
+
+    Args:
+        query:    What to search for.
+        vendor:   Optional — narrow to a specific vendor.
+        product:  Optional — narrow to a specific product.
+        doc_type: Optional — filter by document type.
+    """
+    filter_desc = "  ".join(
+        f"{k}={v}"
+        for k, v in [("vendor", vendor), ("product", product), ("doc_type", doc_type)]
+        if v
+    )
+    log.info("search_community query=%r  filters: %s", query, filter_desc or "none")
+
+    t0 = time.monotonic()
+    qid = _next_id()
+    with _active_lock:
+        _active[qid] = {
+            "query": f"[community] {query}" + (f"  [{filter_desc}]" if filter_desc else ""),
+            "started_at": t0,
+            "started_ts": datetime.now(UTC).strftime("%H:%M:%S UTC"),
+        }
+
+    try:
+        async with asyncio.timeout(SEARCH_TIMEOUT):
+            try:
+                hits = await _run_search(
+                    query,
+                    build_filter(vendor, product, doc_type, "", community=True),
+                )
+            except UnexpectedResponse as exc:
+                if "doesn't exist" in str(exc):
+                    return "No documents have been ingested yet."
+                raise
+
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        if not hits:
+            msg = "No community references found."
+            if vendor or product or doc_type:
+                msg += f" Filters applied: {filter_desc}."
+            log_query(
+                query, vendor, product, doc_type, None, 0, None, None, latency_ms, "community"
+            )
+            return msg
+
+        top = hits[0]
+        log_query(
+            query,
+            vendor,
+            product,
+            doc_type,
+            round(top.score, 4),
+            len(hits),
+            top.payload.get("source"),
+            top.payload.get("page"),
+            latency_ms,
+            top_source_type="community",
+        )
+
+    except TimeoutError:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        log.error("search_community timed out after %dms for query=%r", latency_ms, query)
+        log_query(query, vendor, product, doc_type, None, 0, None, None, latency_ms)
+        return f"Search timed out after {SEARCH_TIMEOUT}s. Try again."
+
+    finally:
+        with _active_lock:
+            _active.pop(qid, None)
+
+    caveat = (
+        "COMMUNITY SOURCES — tier 4. Results from curated community content "
+        "(blogs, forum posts, web articles). May contain useful real-world experience "
+        "but NOT authoritative. Verify against vendor documentation before implementing."
+    )
+
+    sections = [caveat]
+    for i, hit in enumerate(hits, 1):
+        p = hit.payload
+        meta_parts = "  ".join(f"{k}={p[k]}" for k in ("vendor", "product", "version") if p.get(k))
+        header = f"[{i}] score {hit.score:.3f}"
+        if meta_parts:
+            header += f"  |  {meta_parts}"
+        if section := p.get("section_title"):
+            header += f"  |  §{section}"
+        if url := p.get("url"):
+            header += f"\n    URL: {url}"
+        if doc_date := p.get("last_updated"):
+            header += f"  |  date: {doc_date}"
+
+        sections.append(f"{header}\n{p['text'].strip()}")
 
     return "\n\n---\n\n".join(sections)
 
@@ -460,7 +678,16 @@ def collect_qdrant_stats() -> dict:
     except Exception as exc:
         return {"error": str(exc)}
 
-    META_FIELDS = ["source", "page", "vendor", "product", "version", "doc_type"]
+    META_FIELDS = [
+        "source",
+        "page",
+        "vendor",
+        "product",
+        "version",
+        "doc_type",
+        "source_type",
+        "trust_tier",
+    ]
     sources: dict = defaultdict(lambda: {"chunks": 0, "pages": set()})
     offset = None
     while True:
@@ -476,8 +703,8 @@ def collect_qdrant_stats() -> dict:
             src = p.get("source", "unknown")
             sources[src]["chunks"] += 1
             sources[src]["pages"].add(p.get("page", 0))
-            for field in ("vendor", "product", "version", "doc_type"):
-                if field not in sources[src] and p.get(field):
+            for field in ("vendor", "product", "version", "doc_type", "source_type", "trust_tier"):
+                if field not in sources[src] and p.get(field) is not None:
                     sources[src][field] = p[field]
         if offset is None:
             break
@@ -494,6 +721,8 @@ def collect_qdrant_stats() -> dict:
                 "product": v.get("product"),
                 "version": v.get("version"),
                 "doc_type": v.get("doc_type"),
+                "source_type": v.get("source_type"),
+                "trust_tier": v.get("trust_tier"),
             }
             for src, v in sorted(sources.items())
         },
@@ -519,7 +748,23 @@ def score_badge(score: float | None) -> str:
 def tag(value: str | None) -> str:
     if not value:
         return '<span style="color:#484f58">—</span>'
-    return f'<span style="background:#21262d;border:1px solid #30363d;border-radius:4px;padding:.1rem .4rem;font-size:.75rem">{value}</span>'
+    return (
+        f'<span style="background:#21262d;border:1px solid #30363d;border-radius:4px;'
+        f'padding:.1rem .4rem;font-size:.75rem">{value}</span>'
+    )
+
+
+def tier_badge_html(tier: int | None) -> str:
+    if tier is None:
+        return '<span style="color:#484f58">—</span>'
+    colors = {1: "#3fb950", 2: "#58a6ff", 3: "#d29922", 4: "#f85149"}
+    labels = {1: "vendor t1", 2: "validated t2", 3: "internal t3", 4: "community t4"}
+    color = colors.get(tier, "#8b949e")
+    label = labels.get(tier, f"tier-{tier}")
+    return (
+        f'<span style="color:{color};background:#21262d;border:1px solid {color}40;'
+        f'border-radius:4px;padding:.1rem .4rem;font-size:.75rem">{label}</span>'
+    )
 
 
 def _render_active_banner(active: dict) -> str:
@@ -584,7 +829,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
 
     def catalog_rows():
         if not qdrant_stats["sources"]:
-            return '<tr><td colspan="7" class="empty">No documents ingested yet</td></tr>'
+            return '<tr><td colspan="8" class="empty">No documents ingested yet</td></tr>'
         return "".join(
             f"<tr>"
             f'<td class="src">{src}</td>'
@@ -592,6 +837,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
             f"<td>{tag(info.get('product'))}</td>"
             f"<td>{tag(info.get('version'))}</td>"
             f"<td>{tag(info.get('doc_type'))}</td>"
+            f"<td>{tier_badge_html(info.get('trust_tier'))}</td>"
             f'<td class="num">{info["pages"]}</td>'
             f'<td class="num">{info["chunks"]:,}</td>'
             f"</tr>"
@@ -728,7 +974,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
   <table>
     <thead><tr>
       <th>Document</th><th>Vendor</th><th>Product</th>
-      <th>Version</th><th>Doc Type</th>
+      <th>Version</th><th>Doc Type</th><th>Trust Tier</th>
       <th style="text-align:right">Pages</th><th style="text-align:right">Chunks</th>
     </tr></thead>
     <tbody>{catalog_rows()}</tbody>
@@ -781,6 +1027,11 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
     &nbsp;·&nbsp; Score: <span style="color:#3fb950">≥0.70 good</span>
     <span style="color:#d29922"> ≥0.50 ok</span>
     <span style="color:#f85149"> &lt;0.50 gap</span>
+    &nbsp;·&nbsp; Tiers:
+    <span style="color:#3fb950">1=vendor</span>
+    <span style="color:#58a6ff"> 2=validated</span>
+    <span style="color:#d29922"> 3=internal</span>
+    <span style="color:#f85149"> 4=community (search_community only)</span>
   </p>
 </body>
 </html>"""
