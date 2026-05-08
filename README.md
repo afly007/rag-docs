@@ -24,11 +24,12 @@ flowchart TB
     subgraph local["💻 Local Machine"]
         CC["Claude Code CLI"]
         CD["Claude Desktop\nvia mcp-remote"]
+        BE["Browser Extension\nChrome · Firefox"]
     end
 
     subgraph remote["🖥️ Remote Server"]
         subgraph docker["Docker Compose"]
-            MCP["MCP Server  :8000\nsearch_docs · search_community · list_docs\n/stats dashboard"]
+            MCP["MCP Server  :8000\nsearch_docs · search_community · list_docs\n/stats · /clip · /clip/meta"]
             QD[("Qdrant  :6333\ndense + BM25 vectors\nfull-text payload")]
             IN["Ingest\nPDF · Markdown · Web pages"]
         end
@@ -37,6 +38,7 @@ flowchart TB
 
     CC -->|SSE| MCP
     CD -->|SSE| MCP
+    BE -->|"POST /clip"| MCP
     MCP <-->|"hybrid search + RRF fusion"| QD
     IN -->|"embed + upsert"| QD
     DOCS -->|"make ingest"| IN
@@ -178,9 +180,13 @@ The clipper extension lets you save any page you're reading directly to your RAG
 2. In Chrome/Edge, go to `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `browser-extension/` folder
 3. Click the extension icon, open **⚙ Settings**, enter your server URL and API key, click **Test connection**
 
+Firefox: go to `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → select `browser-extension/manifest.json`.
+
 **Using it:**
 
-Browse to any page you want to save — a blog post, forum thread, or vendor article — click the extension icon, optionally tag it with a vendor and product, and click **Save to Network Docs**. The page is fetched, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
+Browse to any page you want to save — a blog post, forum thread, or vendor article — click the extension icon, optionally tag it with a vendor and product (the dropdowns are pre-populated from your collection), and click **Save to Network Docs**. The page is fetched server-side, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
+
+Reddit links are automatically redirected to `old.reddit.com` for better text extraction — a blue notice in the popup confirms the rewrite happened.
 
 Saved pages are immediately searchable via `search_community()`. They won't appear in `search_docs()` results (community content is always opt-in).
 
@@ -501,7 +507,7 @@ Documents without sidecars are still ingested and searchable — metadata is jus
 
 ```
 ghcr.io/afly007/rag-docs/mcp-server:latest
-ghcr.io/afly007/rag-docs/mcp-server:v1.3.0
+ghcr.io/afly007/rag-docs/mcp-server:v1.5.0
 ghcr.io/afly007/rag-docs/ingest:latest
 ```
 
