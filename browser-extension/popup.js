@@ -8,7 +8,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Get current tab URL
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const url = tab?.url || "";
+  let url = tab?.url || "";
+
+  // Reddit serves JS-rendered HTML — rewrite to old.reddit.com for plain HTML
+  const redditRewrite = url.match(/^(https?:\/\/)(www\.|new\.|sh\.)?reddit\.com(\/.*)?$/);
+  if (redditRewrite) {
+    url = `https://old.reddit.com${redditRewrite[3] || "/"}`;
+    showStatus("info", "Redirected to old.reddit.com for better text extraction.");
+  }
+
   urlDisplay.textContent = url;
 
   // Load saved settings
