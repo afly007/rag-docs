@@ -20,6 +20,7 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    MatchAny,
     MatchValue,
     PointStruct,
     Prefetch,
@@ -124,6 +125,15 @@ def connect_qdrant(retries: int = 10, delay: float = 2.0) -> QdrantClient:
     raise RuntimeError("Could not connect to Qdrant after multiple retries")
 
 
+# Vendor aliases — any name in a group matches all names in that group
+_VENDOR_ALIASES: dict[str, list[str]] = {
+    "aruba": ["aruba", "hewlett-packard-enterprise", "hpe", "arubanetworks"],
+    "hpe": ["aruba", "hewlett-packard-enterprise", "hpe", "arubanetworks"],
+    "hewlett-packard-enterprise": ["aruba", "hewlett-packard-enterprise", "hpe", "arubanetworks"],
+    "arubanetworks": ["aruba", "hewlett-packard-enterprise", "hpe", "arubanetworks"],
+}
+
+
 def build_filter(
     vendor: str,
     product: str,
@@ -139,7 +149,8 @@ def build_filter(
     """
     conditions = []
     if vendor:
-        conditions.append(FieldCondition(key="vendor", match=MatchValue(value=vendor)))
+        aliases = _VENDOR_ALIASES.get(vendor.lower(), [vendor])
+        conditions.append(FieldCondition(key="vendor", match=MatchAny(any=aliases)))
     if product:
         conditions.append(FieldCondition(key="product", match=MatchValue(value=product)))
     if doc_type:
