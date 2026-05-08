@@ -65,7 +65,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   settingsLink.addEventListener("click", (e) => {
     e.preventDefault();
-    chrome.runtime.openOptionsPage();
+    chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
   });
 });
 
