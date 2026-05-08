@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
+import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
 
@@ -19,10 +21,11 @@ from qdrant_client.models import (
     Fusion,
     FusionQuery,
     MatchValue,
+    PointStruct,
     Prefetch,
     SparseVector,
 )
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -38,6 +41,7 @@ PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
 RERANKER = os.environ.get("RERANKER", "").lower()  # "local", "cohere", or ""
 RERANKER_CACHE_DIR = os.environ.get("RERANKER_CACHE_DIR", "/data/reranker-cache")
 TIER_BOOST_4 = float(os.environ.get("TIER_BOOST_4", "0.75"))
+CLIP_API_KEY = os.environ.get("CLIP_API_KEY", "")
 STATS_TTL = 60
 GAP_THRESHOLD = 0.02  # RRF scores are much smaller than cosine scores
 SEARCH_TIMEOUT = 25
@@ -660,6 +664,182 @@ async def search_community(
         sections.append(f"{header}\n{p['text'].strip()}")
 
     return "\n\n---\n\n".join(sections)
+
+
+# ── Browser clipper ───────────────────────────────────────────────────────────
+
+_CLIP_HEADING_RE = re.compile(r"^#{1,3}\s+.+$", re.MULTILINE)
+_CLIP_CHUNK_SIZE = 750
+_CLIP_CHUNK_OVERLAP = 100
+
+
+def _clip_fetch(url: str) -> str | None:
+    """Fetch and extract main text from a URL. Runs in a thread pool (sync)."""
+    import trafilatura
+
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        return None
+    return trafilatura.extract(
+        downloaded,
+        include_tables=True,
+        include_links=False,
+        output_format="markdown",
+    )
+
+
+def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
+    """Heading-boundary chunking for web content; fixed-stride fallback."""
+    positions = [m.start() for m in _CLIP_HEADING_RE.finditer(text)]
+    sections: list[str] = []
+    if positions:
+        for i, pos in enumerate(positions):
+            end = positions[i + 1] if i + 1 < len(positions) else len(text)
+            body = text[pos:end].strip()
+            if body:
+                sections.append(body)
+    else:
+        sections = [text.strip()]
+
+    chunks: list[dict] = []
+    chunk_idx = 0
+    for section in sections:
+        tokens = enc.encode(section)
+        start = 0
+        while start < len(tokens):
+            end = min(start + _CLIP_CHUNK_SIZE, len(tokens))
+            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{chunk_idx}"))
+            chunks.append(
+                {
+                    "id": chunk_id,
+                    "text": enc.decode(tokens[start:end]),
+                    "source": source,
+                    "page": 1,
+                    "chunk_index": chunk_idx,
+                    **meta,
+                }
+            )
+            start += _CLIP_CHUNK_SIZE - _CLIP_CHUNK_OVERLAP
+            chunk_idx += 1
+    return chunks
+
+
+@mcp.custom_route("/clip", methods=["POST", "OPTIONS"])
+async def clip_handler(request):
+    """Receive a URL from the browser extension, fetch it, and ingest it as tier-4 community content."""
+    cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    }
+
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+
+    if not CLIP_API_KEY:
+        return JSONResponse(
+            {"error": "Clipper not configured — set CLIP_API_KEY in your server environment."},
+            status_code=503,
+            headers=cors,
+        )
+
+    auth = request.headers.get("Authorization", "")
+    if not (auth.startswith("Bearer ") and auth[7:] == CLIP_API_KEY):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401, headers=cors)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400, headers=cors)
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "'url' is required"}, status_code=400, headers=cors)
+
+    # Skip if already ingested
+    try:
+        existing, _ = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=url))]),
+            limit=1,
+            with_vectors=False,
+            with_payload=False,
+        )
+        if existing:
+            return JSONResponse(
+                {"chunks": 0, "skipped": True, "message": "Already ingested"},
+                headers=cors,
+            )
+    except Exception:
+        pass
+
+    meta: dict = {"trust_tier": 4, "source_type": "community", "url": url}
+    for key in ("vendor", "product", "doc_type"):
+        if val := (body.get(key) or "").strip().lower():
+            meta[key] = val
+    if val := (body.get("last_updated") or "").strip():
+        meta["last_updated"] = val
+
+    log.info("clip url=%r  meta=%s", url, {k: v for k, v in meta.items() if k != "url"})
+
+    try:
+        async with asyncio.timeout(60):
+            text = await asyncio.get_event_loop().run_in_executor(None, _clip_fetch, url)
+            if not text or not text.strip():
+                return JSONResponse(
+                    {"error": "No extractable text found at that URL"},
+                    status_code=422,
+                    headers=cors,
+                )
+
+            chunks = _clip_chunk(text, url, meta)
+
+            # Embed in batches of 100
+            texts = [c["text"] for c in chunks]
+            all_embeddings: list = []
+            for i in range(0, len(texts), 100):
+                resp = await openai_client.embeddings.create(
+                    model=EMBEDDING_MODEL, input=texts[i : i + 100]
+                )
+                all_embeddings.extend(r.embedding for r in resp.data)
+
+            for chunk, vec in zip(chunks, all_embeddings):
+                chunk["vector"] = vec
+                chunk["sparse"] = compute_sparse(chunk["text"])
+
+            points = [
+                PointStruct(
+                    id=c["id"],
+                    vector={"dense": c["vector"], "bm25": c["sparse"]},
+                    payload={k: c[k] for k in c if k not in ("id", "vector", "sparse")},
+                )
+                for c in chunks
+            ]
+            for i in range(0, len(points), 200):
+                qdrant.upsert(collection_name=COLLECTION_NAME, points=points[i : i + 200])
+
+            _qdrant_cache["at"] = 0.0  # invalidate stats cache
+
+    except TimeoutError:
+        return JSONResponse(
+            {"error": "Timed out fetching the page — it may be too slow or require a login"},
+            status_code=504,
+            headers=cors,
+        )
+    except UnexpectedResponse as exc:
+        if "doesn't exist" in str(exc):
+            return JSONResponse(
+                {"error": "Collection not found — run `make ingest` once to create it"},
+                status_code=503,
+                headers=cors,
+            )
+        return JSONResponse({"error": str(exc)}, status_code=500, headers=cors)
+    except Exception as exc:
+        log.error("clip error url=%r: %s", url, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500, headers=cors)
+
+    log.info("clip done url=%r  chunks=%d", url, len(chunks))
+    return JSONResponse({"chunks": len(chunks), "source": url}, headers=cors)
 
 
 # ── Stats page ────────────────────────────────────────────────────────────────

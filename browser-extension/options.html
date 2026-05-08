@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Network Docs Clipper — Settings</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      max-width: 520px;
+      margin: 40px auto;
+      padding: 0 24px;
+    }
+
+    h1 {
+      font-size: 1.1rem;
+      color: #58a6ff;
+      margin-bottom: 8px;
+      letter-spacing: .03em;
+    }
+
+    .subtitle {
+      font-size: .75rem;
+      color: #8b949e;
+      margin-bottom: 28px;
+    }
+
+    .field {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: .7rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="url"] {
+      width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      font-family: inherit;
+      font-size: .85rem;
+      padding: 8px 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus { border-color: #58a6ff; }
+    input::placeholder { color: #484f58; }
+
+    .hint {
+      font-size: .68rem;
+      color: #484f58;
+      margin-top: 5px;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    button {
+      background: #238636;
+      border: 1px solid #2ea043;
+      border-radius: 6px;
+      color: #fff;
+      font-family: inherit;
+      font-size: .82rem;
+      font-weight: 600;
+      padding: 8px 20px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    button:hover { background: #2ea043; }
+
+    #saved-msg {
+      font-size: .75rem;
+      color: #3fb950;
+      opacity: 0;
+      transition: opacity .3s;
+    }
+    #saved-msg.visible { opacity: 1; }
+
+    .test-result {
+      margin-top: 16px;
+      font-size: .75rem;
+      padding: 8px 12px;
+      border-radius: 4px;
+      display: none;
+    }
+    .test-result.success { display: block; color: #3fb950; background: #0d2818; border: 1px solid #2ea04340; }
+    .test-result.error   { display: block; color: #f85149; background: #2d0f0f; border: 1px solid #f8514940; }
+  </style>
+</head>
+<body>
+  <h1>&#9673; Network Docs Clipper — Settings</h1>
+  <p class="subtitle">Configure the connection to your RAG server.</p>
+
+  <div class="field">
+    <label for="server-url">Server URL</label>
+    <input type="url" id="server-url" placeholder="http://192.168.0.50:8000">
+    <p class="hint">Base URL of your Network Docs RAG server — no trailing slash.</p>
+  </div>
+
+  <div class="field">
+    <label for="api-key">API Key</label>
+    <input type="password" id="api-key" placeholder="your-clip-api-key">
+    <p class="hint">
+      The value of <code>CLIP_API_KEY</code> in your server's <code>.env</code> file.
+      Generate one with: <code>openssl rand -hex 32</code>
+    </p>
+  </div>
+
+  <div class="actions">
+    <button id="save-btn">Save</button>
+    <button id="test-btn" style="background:#21262d;border-color:#30363d">Test connection</button>
+    <span id="saved-msg">Settings saved.</span>
+  </div>
+
+  <div id="test-result" class="test-result"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

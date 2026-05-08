@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Network Docs Clipper</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      width: 340px;
+      padding: 16px;
+    }
+
+    h1 {
+      font-size: .9rem;
+      color: #58a6ff;
+      margin-bottom: 12px;
+      letter-spacing: .04em;
+    }
+
+    .url-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: .72rem;
+      color: #79c0ff;
+      word-break: break-all;
+      margin-bottom: 14px;
+      line-height: 1.4;
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: .65rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      margin-bottom: 4px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      color: #c9d1d9;
+      font-family: inherit;
+      font-size: .78rem;
+      padding: 5px 8px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus { border-color: #58a6ff; }
+    input[type="text"]::placeholder { color: #484f58; }
+
+    button#save-btn {
+      width: 100%;
+      background: #238636;
+      border: 1px solid #2ea043;
+      border-radius: 6px;
+      color: #fff;
+      font-family: inherit;
+      font-size: .82rem;
+      font-weight: 600;
+      padding: 8px;
+      cursor: pointer;
+      transition: background .15s;
+      margin-bottom: 10px;
+    }
+    button#save-btn:hover:not(:disabled) { background: #2ea043; }
+    button#save-btn:disabled { opacity: .5; cursor: default; }
+
+    #status {
+      font-size: .75rem;
+      min-height: 18px;
+      margin-bottom: 10px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      display: none;
+      line-height: 1.4;
+    }
+    #status.loading { display: block; color: #8b949e; background: #161b22; border: 1px solid #30363d; }
+    #status.success { display: block; color: #3fb950; background: #0d2818; border: 1px solid #2ea04340; }
+    #status.error   { display: block; color: #f85149; background: #2d0f0f; border: 1px solid #f8514940; }
+    #status.skipped { display: block; color: #d29922; background: #1f1a0d; border: 1px solid #d2992240; }
+
+    .footer {
+      display: flex;
+      justify-content: flex-end;
+      border-top: 1px solid #21262d;
+      padding-top: 8px;
+    }
+
+    a#settings-link {
+      font-size: .7rem;
+      color: #484f58;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    a#settings-link:hover { color: #8b949e; }
+  </style>
+</head>
+<body>
+  <h1>&#9673; Network Docs Clipper</h1>
+
+  <div class="url-box" id="url-display">Loading…</div>
+
+  <div class="fields">
+    <div>
+      <label for="vendor">Vendor</label>
+      <input type="text" id="vendor" placeholder="cisco, aruba…">
+    </div>
+    <div>
+      <label for="product">Product</label>
+      <input type="text" id="product" placeholder="ios-xe, aos-cx…">
+    </div>
+  </div>
+
+  <button id="save-btn">Save to Network Docs</button>
+
+  <div id="status"></div>
+
+  <div class="footer">
+    <a id="settings-link">⚙ Settings</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
