@@ -181,6 +181,25 @@ Changing the model requires:
 2. Update `EMBEDDING_MODEL` and `EMBEDDING_DIM` in both `ingest/ingest.py` and `mcp-server/server.py`
 3. Re-ingest all documents
 
+## Security posture
+
+This server runs on a private LAN (`192.168.0.50`) — network isolation is the primary perimeter. Known gaps tracked as GitHub issues.
+
+**What is protected:**
+- `/clip` and `/clip/meta` require `Bearer CLIP_API_KEY` header
+- Qdrant write access only via the mcp-server container (no external writes possible without LAN access)
+- Query log (SQLite) is inside a Docker volume, not externally accessible
+
+**What is NOT protected (see issues for fixes):**
+- MCP SSE endpoint (`/sse`) has no authentication — any LAN host can call all MCP tools
+- `/stats` page is unauthenticated — exposes document catalog and query history
+- Qdrant port 6333 is bound to the host — any LAN host can read/write/delete the collection directly
+- `/clip` fetches any URL without SSRF protection — can probe internal services
+- No rate limiting on `/clip` — OpenAI credits can be exhausted by bulk requests
+- All traffic is plaintext HTTP — API keys travel unencrypted on the LAN
+- Browser extension `host_permissions` is `["http://*/*", "https://*/*"]` — broader than needed
+- CORS on `/clip` is `Allow-Origin: *` — any page can trigger clip requests if key is known
+
 ## Pending work
 
 Priority-ordered. Items marked **quality** improve search results; **infra** are maintenance/reliability.
