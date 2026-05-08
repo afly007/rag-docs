@@ -30,6 +30,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!serverUrl || !apiKey) {
     showStatus("error", "Not configured — click ⚙ Settings to add your server URL and API key.");
     saveBtn.disabled = true;
+  } else {
+    // Populate vendor/product dropdowns from server
+    try {
+      const metaResp = await fetch(`${serverUrl}/clip/meta`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (metaResp.ok) {
+        const { vendors = [], products = [] } = await metaResp.json();
+        const vendorList = document.getElementById("vendor-list");
+        const productList = document.getElementById("product-list");
+        vendors.forEach((v) => { const o = document.createElement("option"); o.value = v; vendorList.appendChild(o); });
+        products.forEach((p) => { const o = document.createElement("option"); o.value = p; productList.appendChild(o); });
+      }
+    } catch (_) {
+      // Non-fatal — dropdowns just won't have suggestions
+    }
   }
 
   saveBtn.addEventListener("click", async () => {
