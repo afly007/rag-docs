@@ -429,6 +429,8 @@ async def search_docs(
         header = f"[{i}] {p['source']}  |  page {p['page']}  |  score {hit.score:.3f}"
         if meta_parts:
             header += f"  |  {meta_parts}"
+        if section := p.get("section_title"):
+            header += f"  |  §{section}"
 
         chunk_idx = p.get("chunk_index")
         if chunk_idx is not None:
