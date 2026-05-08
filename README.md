@@ -1,134 +1,126 @@
 # Network Docs RAG
 
-A self-hosted RAG pipeline that ingests vendor PDF documentation and exposes `search_docs` and `list_docs` tools via MCP server, allowing Claude to retrieve relevant CLI syntax, configuration examples, and design references mid-conversation.
+Give Claude a private library of your vendor documentation — so when you ask it how to configure OSPF on AOS-CX or what the correct BGP community syntax is for IOS-XE 17.9, it answers from *your actual manuals*, not from general training data.
 
-## Architecture
+---
 
+## Why does this matter?
+
+Claude is a capable assistant, but it has two limitations when it comes to vendor networking documentation:
+
+1. **It may be out of date.** Training has a knowledge cutoff, so it may not know the exact syntax for the firmware version you're running.
+2. **It can guess.** When Claude doesn't know something precisely, it sometimes produces a confident-sounding but wrong answer — a real problem when you're configuring production equipment.
+
+This project fixes both. You give it your PDFs (and Markdown notes, and curated web links), and from that point on Claude searches them before answering. Every response is grounded in a specific chunk of a specific document, with a source reference you can open yourself.
+
+Think of it like giving a knowledgeable colleague a stack of manuals and saying: *"only answer from what's in here."*
+
+---
+
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph local["💻 Local Machine"]
+        CC["Claude Code CLI"]
+        CD["Claude Desktop\nvia mcp-remote"]
+    end
+
+    subgraph remote["🖥️ Remote Server"]
+        subgraph docker["Docker Compose"]
+            MCP["MCP Server  :8000\nsearch_docs · search_community · list_docs\n/stats dashboard"]
+            QD[("Qdrant  :6333\ndense + BM25 vectors\nfull-text payload")]
+            IN["Ingest\nPDF · Markdown · Web pages"]
+        end
+        DOCS["./docs/\nPDFs · .md files · community.json"]
+    end
+
+    CC -->|SSE| MCP
+    CD -->|SSE| MCP
+    MCP <-->|"hybrid search + RRF fusion"| QD
+    IN -->|"embed + upsert"| QD
+    DOCS -->|"make ingest"| IN
 ```
-┌─────────────────────────────────────────────────┐
-│                 Remote Server                   │
-│                                                 │
-│  ┌──────────┐      ┌──────────────────────────┐ │
-│  │  Qdrant  │◄─────│  MCP Server  :8000       │ │
-│  │  :6333   │      │  /sse  — search_docs()   │ │
-│  └──────────┘      │         list_docs()      │ │
-│        ▲           │  /stats — dashboard      │ │
-│  ┌─────┴──────────────────────────┐            │ │
-│  │  Ingest (one-shot container)   │            │ │
-│  │  ./docs/*.pdf → chunks →       │            │ │
-│  │  dense + BM25 vectors → Qdrant │            │ │
-│  └────────────────────────────────┘            │ │
-│                    └──────────────────────────┘ │
-└─────────────────────────────────────────────────┘
-                    ▲
-          SSH tunnel / local network
-                    │
-       ┌────────────┴───────────────┐
-       │  Claude Code  ~/.claude/   │
-       │  Claude Desktop  mcp-remote│
-       └────────────────────────────┘
-```
 
-**Components:**
-| Service | Image / Build | Purpose |
+You drop documents into `./docs/` → they are broken into sections and indexed → when you ask Claude a question, it searches the index first, finds the relevant sections, and answers using the actual text from your documents, citing the source and page number every time.
+
+The indexing happens once (or automatically when you drop new files in). Search is instant.
+
+---
+
+## What you can search
+
+There are four types of sources, treated with different levels of trust:
+
+| Type | Examples | Trust level |
 |---|---|---|
-| `qdrant` | `qdrant/qdrant:latest` | Vector database — stores dense + sparse vectors and full text |
-| `mcp-server` | `./mcp-server` | FastMCP over SSE — exposes `search_docs` and `list_docs` tools, stats dashboard, query log |
-| `ingest` | `./ingest` | One-shot PDF ingestion (run manually, profile-gated) |
-| `ingest-watch` | `./ingest` | Continuous watch mode — polls `./docs/` every 30s and ingests new PDFs automatically (profile-gated) |
+| **Vendor documentation** | Cisco CLI reference, Juniper config guide, Arista EOS docs | Authoritative — use for CLI syntax and configuration |
+| **Validated designs** | HPE Aruba Validated Solution Guides, Cisco CVDs, reference architectures | High — vendor-recommended designs and best practices |
+| **Internal notes** | Your team's Markdown runbooks, design notes, internal guides | Trusted — your own organisation's knowledge |
+| **Community references** | Curated blog posts, forum threads, web articles | Useful context — always verify against vendor docs before implementing |
 
-**Embeddings:** OpenAI `text-embedding-3-small` (1536 dims, cosine similarity)
-**Search:** Hybrid — dense vector + BM25 sparse (tiktoken TF · Qdrant IDF), fused with Reciprocal Rank Fusion, optional cross-encoder re-ranking
-**Chunking:** Section-aware — splits at PDF TOC boundaries so CLI blocks and tables stay intact; falls back to fixed 750-token stride for docs with no TOC
-**Persistent volumes:** `qdrant_data` (vectors), `mcp_data` (query log SQLite DB)
+Community sources are kept deliberately separate. Claude won't mix them into standard search results — you have to explicitly ask for them, and every response comes with a reminder to verify before acting.
 
 ---
 
-## Prerequisites
+## Quick start
 
-- Docker + Docker Compose v2
-- OpenAI API key
-- Claude Code CLI and/or Claude Desktop app (local machine)
-
----
-
-## Setup
-
-### 1. Configure environment
+**You need:** Docker, an OpenAI API key, and Claude Code or Claude Desktop.
 
 ```bash
+# 1. Clone and configure
 cp .env.example .env
-```
+# Edit .env — add your OPENAI_API_KEY
 
-Edit `.env`:
-```
-OPENAI_API_KEY=sk-...
-COLLECTION_NAME=network_docs        # optional — change to namespace multiple doc sets
-IMAGE_BASE=ghcr.io/afly007/rag-docs # required for docker compose pull to resolve GHCR images
-```
-
-### 2. Start Qdrant and MCP server
-
-```bash
+# 2. Start the server
 docker compose up -d
-```
 
-Both `qdrant_data` and `mcp_data` are Docker volumes — they survive container restarts and rebuilds.
-
-### 3. Add PDFs and ingest
-
-Copy vendor PDFs into `./docs/`, then run the ingest container:
-
-```bash
-# ingest everything in ./docs/
+# 3. Drop your PDFs into ./docs/ then ingest
 make ingest
 
-# or target specific files
-docker compose --profile ingest run --rm ingest /docs/cisco-ios-xe-17.pdf
+# 4. Connect Claude — add to ~/.claude/settings.json
+{
+  "mcpServers": {
+    "network-docs": {
+      "type": "sse",
+      "url": "http://YOUR_SERVER_IP:8000/sse"
+    }
+  }
+}
+```
+
+That's it. Claude can now search your documents.
+
+---
+
+## Adding documents
+
+### Vendor PDFs
+
+Drop them into `./docs/` and run:
+
+```bash
+make ingest
 ```
 
 Progress is shown per file:
 
 ```
-Found 2 PDF(s) to ingest
-
 ────────────────────────────────────────────────────────────
 File:  cisco-ios-xe-17.pdf  (42.3 MB)
 Pages: 1847 total, 1831 with text
 Chunks: 4209  (43 embedding batches)
-  Embedding: 100%|████████████| 43/43 [00:18<00:00,  2.3batch/s]
-  Storing:   100%|████████████| 22/22 [00:04<00:00]
 Done:  4209 chunks stored in 23.1s
-
-════════════════════════════════════════════════════════════
-Finished: 2 file(s), 7431 chunks total in 41.6s
 ```
 
-Ingestion is **idempotent** — re-running on the same file upserts identical vectors. Safe to re-run after adding new PDFs.
-
-### Tagging documents with metadata
-
-#### Option A — Auto-generate sidecars (recommended)
+To help Claude filter by vendor, product, or version, add a small metadata file next to each PDF. You can write it manually or generate it automatically:
 
 ```bash
-make gen-sidecars
+make gen-sidecars   # scans each PDF with GPT-4o-mini and writes a draft .json
 ```
 
-This calls gpt-4o-mini on the first 10 pages of each PDF to extract vendor, product, version, and doc_type, then writes a draft `.json` sidecar alongside each PDF. Review and edit the files before ingesting.
+Review and edit the generated files before re-ingesting. They look like this:
 
-#### Option B — Write sidecars manually
-
-For each PDF, create a sidecar `.json` with the same base name:
-
-```
-docs/
-  cisco-ios-xe-17.pdf
-  cisco-ios-xe-17.json      ← sidecar
-  juniper-junos-23.pdf
-  juniper-junos-23.json
-```
-
-Sidecar format (all fields optional):
 ```json
 {
   "vendor":   "cisco",
@@ -138,43 +130,181 @@ Sidecar format (all fields optional):
 }
 ```
 
-Common `doc_type` values: `cli-reference`, `config-guide`, `design-guide`, `release-notes`, `white-paper`
+`gen-sidecars` also automatically detects validated design guides (CVDs, VSDs, reference architectures) and tags them accordingly. See [Metadata reference](#metadata-reference) for the full format.
 
-Without a sidecar the document is still ingested and searchable — metadata just won't be available for filtering. You can add sidecars later and re-ingest with `make ingest-force` to backfill.
+Ingestion is idempotent — re-running on the same file is safe.
+
+### Internal Markdown notes
+
+Your team's runbooks, design decisions, and internal guides are valuable context. Drop `.md` files into `./docs/` (in any subfolder) and run `make ingest`. They are chunked by heading boundaries, falling back to fixed-stride for files without headings.
+
+Add a sidecar to tag them as internal:
+
+```json
+{
+  "doc_type":    "design-guide",
+  "source_type": "internal"
+}
+```
+
+### Curated web pages
+
+For blog posts or forum threads you've found genuinely useful, create a manifest file:
+
+```json
+[
+  {
+    "url": "https://example.com/ospf-tuning-tips",
+    "vendor": "aruba",
+    "product": "aos-cx",
+    "last_updated": "2024-06-01"
+  }
+]
+```
+
+```bash
+make ingest-web ARGS="/docs/community.json"
+```
+
+These are stored as community-tier content and only surface when you explicitly ask for them.
+
+### Auto-ingest watch
+
+To ingest new files automatically as you drop them in:
+
+```bash
+make watch        # starts background watcher — polls ./docs/ every 30s
+make watch-stop   # stop it
+```
+
+---
+
+## Talking to Claude effectively
+
+Claude uses the search tool when it recognises that your question is about your documentation. A few phrases that reliably trigger it:
+
+- *"Search my network docs for…"*
+- *"According to the AOS-CX documentation, how do I…"*
+- *"Using the docs, what's the correct syntax for…"*
+- *"Check the Juniper config guide for…"*
+
+**What works well:**
+- CLI syntax questions — *"What's the command to configure LACP on AOS-CX?"*
+- Configuration examples — *"Show me how to set up OSPF area types on IOS-XE"*
+- Design tradeoffs — *"What does the Aruba validated design recommend for campus core redundancy?"*
+- Version-specific questions — *"Is this BGP syntax valid in JunOS 23.2?"*
+
+**What doesn't work:**
+- Asking about topics not in your documents — Claude will say nothing relevant was found rather than guessing
+- Very short or ambiguous queries — give Claude enough to search with
+
+### Sample conversation
+
+```
+You:    Search my network docs for how to configure BGP route reflectors on IOS-XE
+
+Claude: [calls search_docs("BGP route reflector configuration", vendor="cisco", product="ios-xe")]
+
+        [1] cisco-ios-xe-17-cli.pdf  |  page 847  |  §BGP Route Reflector  |  [VENDOR-DOC tier-1]
+
+        To configure a route reflector:
+
+          router bgp 65000
+           bgp cluster-id 1
+           neighbor 10.0.0.2 remote-as 65000
+           neighbor 10.0.0.2 route-reflector-client
+
+        The cluster-id is optional when there is only one route reflector in the cluster...
+```
+
+### Asking for community references
+
+Community sources are opt-in. Ask for them explicitly and Claude will always flag them as unverified:
+
+```
+You:    Are there any community notes on AOS-CX OSPF tuning?
+
+Claude: [calls search_community("AOS-CX OSPF tuning", product="aos-cx")]
+
+        COMMUNITY SOURCES — tier 4. Results from curated community content.
+        Verify against vendor documentation before implementing in production.
+
+        [1] score 0.412  |  vendor=aruba  |  product=aos-cx
+            URL: https://example.com/ospf-tuning-tips
+            ...
+```
+
+---
+
+## What documents do I have?
+
+Ask Claude directly or check the live dashboard:
+
+```
+You:    What documentation do you have access to?
+
+Claude: [calls list_docs()]
+
+        Collection: network_docs  |  Documents: 14  |  Chunks: 52,108
+
+        Document                            Vendor  Product  Version  Doc Type          Tier
+        ─────────────────────────────────────────────────────────────────────────────────────
+        cisco-ios-xe-17-cli.pdf             cisco   ios-xe   17.9.1   cli-reference     1
+        aruba-vsd-campus-10.13.pdf          hpe     aos-cx   10.13    validated-design  2
+        se-team/bgp-design-notes.md         —       —        —        design-guide      3
+
+        Tier 4 (community) content is excluded — use search_community() to query it.
+```
+
+Open `http://YOUR_SERVER_IP:8000/stats` for a live dashboard showing ingested documents, recent queries, coverage gaps (topics where your library has nothing relevant), and latency.
+
+---
+
+## Upgrading an existing collection
+
+If you have documents ingested before trust tiers were introduced, run this once to tag them all as vendor documentation:
+
+```bash
+make backfill-tiers
+```
+
+No re-ingestion needed — it updates existing records in place.
+
+---
+
+---
+
+# Reference
+
+---
+
+## Environment variables
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | — | Required |
+| `COLLECTION_NAME` | `network_docs` | Qdrant collection name — change to namespace multiple doc sets |
+| `IMAGE_BASE` | `ghcr.io/afly007/rag-docs` | GHCR registry prefix — required for `docker compose pull` |
+| `RERANKER` | _(off)_ | `local` or `cohere` — improves result precision, see below |
+| `COHERE_API_KEY` | — | Required when `RERANKER=cohere` |
+| `TIER_BOOST_4` | `0.75` | Score penalty for community results (1.0 = disabled) |
 
 ### Enabling re-ranking (optional)
 
-Re-ranking improves precision by running a cross-encoder over the top 20 retrieved chunks before returning the top 5. Set `RERANKER` in `.env`:
+Re-ranking improves precision by running a cross-encoder over the top 20 retrieved chunks before returning the top 5. Set in `.env` and restart:
 
 ```bash
-# Local cross-encoder — no API costs, ~22 MB model downloaded on first start
-RERANKER=local
-
-# Cohere Rerank API — requires API key, negligible latency
-RERANKER=cohere
-COHERE_API_KEY=...
+RERANKER=local    # CPU cross-encoder via flashrank — ~22 MB model, downloaded once on first start
+RERANKER=cohere   # Cohere Rerank API — requires COHERE_API_KEY
 ```
-
-Then restart: `docker compose up -d mcp-server`
-
-The local model (`ms-marco-MiniLM-L-12-v2`) is cached in the `mcp_data` volume and only downloaded once. Startup log will show `Local re-ranker ready` when active.
-
-### Auto-ingest watch (optional)
-
-Instead of running `make ingest` manually after every PDF drop, start the watch container:
 
 ```bash
-make watch
+docker compose up -d mcp-server
 ```
-
-This starts `ingest-watch` in the background. It polls `./docs/` every 30 seconds and ingests any PDF not yet in the collection. Drop a file and it will be searchable within 30 seconds.
-
-```bash
-docker compose logs -f ingest-watch   # tail ingestion log
-make watch-stop                        # stop it
-```
-
-The watch container uses `restart: unless-stopped` so it survives server reboots as long as `make up` has been run once.
 
 ---
 
@@ -195,9 +325,9 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### Claude Desktop app
+### Claude Desktop
 
-The desktop app requires `mcp-remote` as a stdio-to-SSE bridge. Install Node first if needed (`brew install node`), then add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The desktop app needs a small bridge. Install Node.js first, then add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -210,70 +340,90 @@ The desktop app requires `mcp-remote` as a stdio-to-SSE bridge. Install Node fir
 }
 ```
 
-The `--allow-http` flag is required for non-localhost URLs. Restart the desktop app after saving.
+The `--allow-http` flag is required for non-localhost URLs. Restart the app after saving.
 
-### SSH tunnel (if not exposing port 8000 publicly)
+### SSH tunnel (if port 8000 is not publicly exposed)
 
 ```bash
 ssh -L 8000:localhost:8000 user@your-server
 ```
 
-Then use `http://localhost:8000/sse` in either config above (and omit `--allow-http` for the desktop app).
+Then use `http://localhost:8000/sse` in either config above, and omit `--allow-http` for the desktop app.
 
 ---
 
-## Usage
+## Day-to-day operations
 
-Two MCP tools are available:
+```bash
+make up              # start Qdrant and MCP server
+make down            # stop everything
+make restart         # rebuild and restart MCP server after code changes
+make logs            # tail MCP server logs
+make build           # build both images locally
 
-### `list_docs()`
+make ingest          # ingest new PDFs and Markdown files (skips already-ingested)
+make ingest-force    # re-ingest everything (use after editing sidecars)
+make ingest-web      # ingest web pages from a manifest  ARGS="/docs/community.json"
+make backfill-tiers  # tag existing chunks with trust_tier=1 (run once after upgrading)
+make watch           # auto-ingest new files dropped into ./docs/ every 30s
+make watch-stop      # stop the watch container
 
-Returns the full document catalog — vendors, products, versions, doc types, and chunk counts. Call this first to discover what filter values are available.
-
-```
-You: What documentation do you have access to?
-
-Claude: [calls list_docs()]
-        → Collection: network_docs  Documents: 12  Chunks: 47,832
-
-        Available vendors:   arista, cisco, juniper
-        Available products:  eos, ios-xe, ios-xr, junos
-        Available versions:  17.9.1, 23.2R1
-        Available doc_types: cli-reference, config-guide
-
-        Document                                      Vendor    Product   Version  Doc Type        Chunks
-        ──────────────────────────────────────────────────────────────────────────────────
-        cisco-ios-xe-17-cli.pdf                       cisco     ios-xe    17.9.1   cli-reference   4,209
-        juniper-junos-23-config.pdf                   juniper   junos     23.2R1   config-guide    3,102
-        ...
+make gen-sidecars    # auto-generate metadata sidecars for PDFs
+make stats           # open stats page in browser (macOS)
 ```
 
-### `search_docs(query, vendor, product, doc_type, version)`
+Pass extra args via `ARGS`:
 
-Searches using hybrid retrieval (BM25 + dense vectors, RRF fused) and returns the top 5 matching chunks with surrounding context. All filter arguments are optional.
-
-```
-You: Search my network docs for how to configure LACP on AOS-CX
-
-Claude: [calls search_docs("LACP link aggregation configuration", product="aos-cx")]
-        → returns top 5 chunks from AOS-CX docs
-        → answers using exact CLI syntax from the vendor docs
+```bash
+make ingest ARGS="/docs/cisco-ios-xe-17.pdf"
+make ingest-force ARGS="/docs/cisco-ios-xe-17.pdf"
+make gen-sidecars ARGS="--force"   # overwrite existing sidecars
 ```
 
-Filter examples:
-```
-search_docs("OSPF area types comparison")
-search_docs("QoS DSCP marking policy-map", vendor="cisco")
-search_docs("EVPN type-5 route", product="junos")
-search_docs("BGP community list", doc_type="cli-reference")
-search_docs("spanning-tree port-priority", version="10.16")
+### View live logs
+
+```bash
+docker compose logs -f mcp-server
+docker compose logs -f qdrant
 ```
 
-**Re-ranking:** When `RERANKER=local` or `RERANKER=cohere` is set, `search_docs` fetches 20 candidates from Qdrant and a cross-encoder re-scores each (query, chunk) pair together before returning the top 5. More accurate than vector similarity alone for ambiguous queries.
+### Query the log database directly
 
-**Prompting tip:** Claude won't use MCP tools unless the question makes it obvious. Phrases like "search my network docs for…", "according to the AOS-CX documentation…", or "use the network-docs tool to look up…" reliably trigger tool calls.
+```bash
+docker run --rm -v rag-docs_mcp_data:/data alpine \
+  sh -c "apk add -q sqlite && sqlite3 /data/queries.db \
+  'SELECT ts, query, top_score, top_source, top_source_type FROM queries ORDER BY id DESC LIMIT 20'"
+```
 
-**Note:** Filtering only works on documents ingested with a sidecar `.json` file. Documents without metadata are always included in unfiltered searches.
+### Delete and re-ingest a collection
+
+```bash
+curl -X DELETE http://localhost:6333/collections/network_docs
+make ingest-force
+```
+
+### Check Qdrant collection info
+
+```bash
+curl http://localhost:6333/collections/network_docs
+```
+
+---
+
+## Managing multiple document sets
+
+Set `COLLECTION_NAME` to separate doc sets into named collections:
+
+```bash
+COLLECTION_NAME=cisco   docker compose --profile ingest run --rm ingest
+COLLECTION_NAME=juniper docker compose --profile ingest run --rm ingest
+```
+
+The MCP server searches whichever collection it was started with. To switch, update `.env` and restart:
+
+```bash
+docker compose up -d mcp-server
+```
 
 ---
 
@@ -281,97 +431,45 @@ search_docs("spanning-tree port-priority", version="10.16")
 
 Open `http://YOUR_SERVER_IP:8000/stats` in a browser. Auto-refreshes every 60 seconds.
 
-**Cards:** Documents · Total Chunks · Queries Today · Total Queries · Avg Latency · Avg Score
-
-**Sections:**
-
 | Section | What it shows |
 |---|---|
-| Document Catalog | All ingested PDFs with vendor, product, version, page and chunk counts |
+| Document Catalog | All ingested documents with vendor, product, version, doc type, trust tier, page and chunk counts |
 | Recent Queries | Last 30 queries — time, text, filters, score, source, latency |
-| Coverage Gaps | Queries with low scores — topics likely missing from your corpus |
+| Coverage Gaps | Queries scoring below threshold — topics likely missing from your corpus |
 | Most Referenced Sources | Which documents get retrieved most, with average relevance score |
-| Slowest Queries | Top 10 by latency — useful for spotting embed API bottlenecks |
+| Slowest Queries | Top 10 by latency — useful for spotting embedding API bottlenecks |
 
-Every query is persisted to `/data/queries.db` (SQLite, WAL mode) inside the `mcp_data` Docker volume. The DB survives container restarts.
-
----
-
-## Managing multiple document sets
-
-Set `COLLECTION_NAME` to separate vendor docs into named collections:
-
-```bash
-# Cisco docs
-COLLECTION_NAME=cisco docker compose --profile ingest run --rm ingest
-
-# Juniper docs
-COLLECTION_NAME=juniper docker compose --profile ingest run --rm ingest
-```
-
-The MCP server searches whichever collection it was started with. To switch collections, update `.env` and restart:
-
-```bash
-docker compose up -d mcp-server
-```
+Every query is persisted to `/data/queries.db` (SQLite, WAL mode) inside the `mcp_data` Docker volume and survives container restarts.
 
 ---
 
-## Operations
+## Metadata reference
 
-### View live logs
-```bash
-docker compose logs -f mcp-server
-docker compose logs -f qdrant
+Every chunk carries two trust fields set from the sidecar `.json` file:
+
+| `trust_tier` | `source_type` | Searchable via | Description |
+|---|---|---|---|
+| 1 | `vendor-doc` | `search_docs()` | Standard vendor CLI refs, config guides, release notes |
+| 2 | `validated-design` | `search_docs()` | CVDs, VSDs, reference architectures |
+| 3 | `internal` | `search_docs()` | Internal team docs and runbooks |
+| 4 | `community` | `search_community()` only | Curated web content — always prepends caveat |
+
+Full sidecar format (all fields optional):
+
+```json
+{
+  "vendor":      "cisco",
+  "product":     "ios-xe",
+  "version":     "17.9.1",
+  "doc_type":    "cli-reference",
+  "trust_tier":  1,
+  "source_type": "vendor-doc"
+}
 ```
 
-### Query the log database directly
-```bash
-docker run --rm -v rag-docs_mcp_data:/data alpine \
-  sh -c "apk add -q sqlite && sqlite3 /data/queries.db \
-  'SELECT ts, query, top_score, top_source FROM queries ORDER BY id DESC LIMIT 20'"
-```
+Common `doc_type` values: `cli-reference`, `config-guide`, `design-guide`, `validated-design`, `release-notes`, `white-paper`
 
-### Delete and re-ingest a collection
-```bash
-curl -X DELETE http://localhost:6333/collections/network_docs
-make ingest-force
-```
-
-### Rebuild after code changes
-```bash
-docker compose build mcp-server
-docker compose up -d mcp-server
-```
-
-### Check Qdrant collection info
-```bash
-curl http://localhost:6333/collections/network_docs
-```
-
----
-
-## Makefile shortcuts
-
-```bash
-make up              # docker compose up -d
-make down            # docker compose down
-make restart         # rebuild and restart mcp-server only
-make logs            # tail mcp-server logs
-make build           # build both images locally
-make ingest          # ingest new PDFs (skips already-ingested)
-make ingest-force    # re-ingest all PDFs
-make watch           # start continuous watch mode (auto-ingest on PDF drop)
-make watch-stop      # stop the watch container
-make gen-sidecars    # auto-generate JSON sidecars via gpt-4o-mini
-make stats           # open stats page in browser (macOS)
-```
-
-Pass extra args via `ARGS`:
-```bash
-make ingest ARGS="/docs/cisco-ios-xe-17.pdf"
-make gen-sidecars ARGS="--force"   # overwrite existing sidecars
-```
+Documents without sidecars are still ingested and searchable — metadata is just not available for filtering. Add sidecars and re-run `make ingest-force` to backfill.
 
 ---
 
@@ -382,16 +480,15 @@ make gen-sidecars ARGS="--force"   # overwrite existing sidecars
 | CI | Every PR + push to `main` | ruff lint + format check, Docker build (no push) |
 | Release | Push to `main` or `v*` tags | Builds and pushes images to GHCR, auto-deploys to server |
 
-**GHCR images:**
+**GHCR images** (public — no login required):
+
 ```
 ghcr.io/afly007/rag-docs/mcp-server:latest
-ghcr.io/afly007/rag-docs/mcp-server:v1.3.0   # pinned release tags
+ghcr.io/afly007/rag-docs/mcp-server:v1.3.0
 ghcr.io/afly007/rag-docs/ingest:latest
 ```
 
-Images are public — no login required to pull.
-
-**Automated deploy:** merges to `main` trigger the release workflow, which builds and pushes new images to GHCR and then deploys via a self-hosted GitHub Actions runner on the server. Manual fallback:
+Merges to `main` auto-deploy via the self-hosted GitHub Actions runner on the server. Manual fallback:
 
 ```bash
 cd ~/rag-docs
@@ -410,7 +507,7 @@ docker compose up -d mcp-server
 make pre-commit-install   # requires: sudo apt install pipx && pipx ensurepath
 ```
 
-All changes go through pull requests — direct pushes to `main` are blocked. The CI workflow must pass (lint + build) before merging.
+All changes go through pull requests — direct pushes to `main` are blocked.
 
 ```bash
 git checkout -b feat/your-feature
@@ -419,6 +516,8 @@ ruff check --fix . && ruff format .   # fix lint before committing
 git add <files> && git commit -m "feat: description"
 git push -u origin feat/your-feature
 gh pr create --title "..." --body "..."
+gh pr checks <number> --watch
+gh pr merge <number> --squash --delete-branch
 ```
 
 ruff is configured in `pyproject.toml` (`line-length=100`, Python 3.12, rules E/F/W/I/UP).

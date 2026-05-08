@@ -36,13 +36,43 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 CHUNK_SIZE = 750
 CHUNK_OVERLAP = 100
-MIN_SECTION_TOKENS = 100  # sections below this are merged forward
+MIN_SECTION_TOKENS = 100
 EMBED_BATCH = 100
 UPSERT_BATCH = 200
 PREFETCH_K = 20  # candidates per retriever fed into RRF fusion
 
 # Recognised sidecar keys — any unknown keys are passed through as-is
-KNOWN_META_KEYS = {"vendor", "product", "version", "doc_type"}
+KNOWN_META_KEYS = {
+    "vendor",
+    "product",
+    "version",
+    "doc_type",
+    "trust_tier",
+    "source_type",
+    "author",
+    "last_updated",
+    "url",
+}
+# Fields stored as int rather than string
+INT_META_KEYS = {"trust_tier"}
+
+# Payload fields always written to Qdrant on every chunk
+PAYLOAD_KEYS = {
+    "text",
+    "source",
+    "page",
+    "chunk_index",
+    "section_title",
+    "section_level",
+    "section_index",
+    "trust_tier",
+    "source_type",
+    "author",
+    "last_updated",
+    "url",
+}
+
+HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
@@ -78,9 +108,9 @@ def delete_source_chunks(source_name: str) -> None:
     )
 
 
-def load_sidecar(pdf_path: Path) -> dict:
-    """Load optional <filename>.json sidecar with metadata for this PDF."""
-    sidecar = pdf_path.with_suffix(".json")
+def load_sidecar(path: Path) -> dict:
+    """Load optional <filename>.json sidecar with metadata for this file."""
+    sidecar = path.with_suffix(".json")
     if not sidecar.exists():
         return {}
     try:
@@ -92,7 +122,18 @@ def load_sidecar(pdf_path: Path) -> dict:
         unknown = set(data) - KNOWN_META_KEYS
         if unknown:
             print(f"  Note: {sidecar.name} contains extra keys {unknown} — storing as-is.")
-        return {k: str(v) for k, v in data.items()}  # normalise all values to strings
+        result: dict = {}
+        for k, v in data.items():
+            if v is None:
+                continue
+            if k in INT_META_KEYS:
+                try:
+                    result[k] = int(v)
+                except (ValueError, TypeError):
+                    print(f"  Warning: {sidecar.name} field '{k}' must be an integer — ignoring.")
+            else:
+                result[k] = str(v)
+        return result
     except Exception as exc:
         print(f"  Warning: could not read {sidecar.name}: {exc}")
         return {}
@@ -114,6 +155,17 @@ def already_ingested(source_name: str) -> bool:
         return False
 
 
+def _source_id(path: Path) -> str:
+    """Return a stable source identifier: path relative to DOCS_DIR, or bare filename."""
+    try:
+        return str(path.relative_to(DOCS_DIR))
+    except ValueError:
+        return path.name
+
+
+# ── PDF section-aware chunking ────────────────────────────────────────────────
+
+
 def extract_toc_sections(doc: fitz.Document) -> list[dict] | None:
     """Extract section boundaries from the PDF's bookmark tree.
 
@@ -125,7 +177,6 @@ def extract_toc_sections(doc: fitz.Document) -> list[dict] | None:
     if not toc:
         return None
 
-    # Normalise to (level, title, start_page_0idx, start_y)
     entries: list[tuple[int, str, int, float]] = []
     for level, title, page_1idx, dest in toc:
         start_page = dest.get("page", page_1idx - 1)
@@ -137,7 +188,6 @@ def extract_toc_sections(doc: fitz.Document) -> list[dict] | None:
     n = len(entries)
     sections = []
     for i, (level, title, start_page, start_y) in enumerate(entries):
-        # End boundary: start of the next entry at the same or higher level
         end_page = len(doc) - 1
         end_y = float("inf")
         for j in range(i + 1, n):
@@ -145,7 +195,6 @@ def extract_toc_sections(doc: fitz.Document) -> list[dict] | None:
                 end_page = entries[j][2]
                 end_y = entries[j][3]
                 break
-
         has_children = (i + 1 < n) and (entries[i + 1][0] > level)
         sections.append(
             {
@@ -158,7 +207,6 @@ def extract_toc_sections(doc: fitz.Document) -> list[dict] | None:
                 "has_children": has_children,
             }
         )
-
     return sections
 
 
@@ -168,17 +216,13 @@ def _build_page_blocks_cache(doc: fitz.Document) -> list[list[tuple[float, str]]
     for page in doc:
         blocks = []
         for block in page.get_text("blocks"):
-            if block[6] == 0:  # text block (type 0); skip images (type 1)
-                blocks.append((block[1], block[4]))  # y0, text
+            if block[6] == 0:  # text block; skip images
+                blocks.append((block[1], block[4]))
         cache.append(blocks)
     return cache
 
 
-def chunk_document_sections(
-    doc: fitz.Document,
-    source: str,
-    meta: dict,
-) -> list[dict] | None:
+def chunk_document_sections(doc: fitz.Document, source: str, meta: dict) -> list[dict] | None:
     """Section-aware chunking using the PDF's TOC as section boundaries.
 
     Returns None when no TOC is found — caller falls back to chunk_document().
@@ -191,21 +235,18 @@ def chunk_document_sections(
     blocks_cache = _build_page_blocks_cache(doc)
     num_pages = len(blocks_cache)
 
-    # Extract token stream and page-per-token for every leaf section
     section_data: list[dict] = []
     for sec in sections:
         if sec["has_children"]:
-            continue  # parent heading; text covered by child sections
+            continue
 
         tokens: list[int] = []
         token_pages: list[int] = []
 
         for pg_idx in range(sec["start_page"], min(sec["end_page"] + 1, num_pages)):
             for y0, text in blocks_cache[pg_idx]:
-                # Clip at start boundary (5pt tolerance for exact heading alignment)
                 if pg_idx == sec["start_page"] and sec["start_y"] > 5 and y0 < sec["start_y"] - 5:
                     continue
-                # Clip at end boundary
                 if (
                     pg_idx == sec["end_page"]
                     and sec["end_y"] != float("inf")
@@ -214,9 +255,9 @@ def chunk_document_sections(
                     continue
                 block_tokens = enc.encode(text)
                 tokens.extend(block_tokens)
-                token_pages.extend([pg_idx + 1] * len(block_tokens))  # 1-indexed page
+                token_pages.extend([pg_idx + 1] * len(block_tokens))
 
-        if tokens:  # skip zero-token sections (header-only entries with no body text)
+        if tokens:
             section_data.append(
                 {
                     "title": sec["title"],
@@ -229,7 +270,6 @@ def chunk_document_sections(
     if not section_data:
         return None
 
-    # Merge consecutive sections that are too short to stand alone
     merged: list[dict] = []
     buf_tokens: list[int] = []
     buf_pages: list[int] = []
@@ -258,7 +298,6 @@ def chunk_document_sections(
             buf_tokens = []
             buf_pages = []
 
-    # Flush any remaining short sections onto the last emitted section
     if buf_tokens:
         if merged:
             merged[-1]["tokens"].extend(buf_tokens)
@@ -273,7 +312,6 @@ def chunk_document_sections(
                 }
             )
 
-    # Sliding-window split within each section
     chunks: list[dict] = []
     chunk_index = 0
 
@@ -288,11 +326,8 @@ def chunk_document_sections(
         while start < len(tokens):
             end = min(start + CHUNK_SIZE, len(tokens))
             chunk_text = enc.decode(tokens[start:end])
-
-            # Give later sub-chunks context about which section they belong to
             if sub_chunk > 0:
                 chunk_text = f"{title}\n{chunk_text}"
-
             chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{title}:{sub_chunk}"))
             chunks.append(
                 {
@@ -315,12 +350,7 @@ def chunk_document_sections(
 
 
 def chunk_document(pages: list[tuple[int, str]], source: str, meta: dict) -> list[dict]:
-    """Chunk the full document as a single token stream.
-
-    Spans page boundaries so CLI syntax that continues across pages stays in
-    the same chunk. Records which page each chunk starts on and a sequential
-    chunk_index used by the MCP server for context-window expansion.
-    """
+    """Chunk the full document as a single token stream (fixed-stride fallback for PDFs)."""
     all_tokens: list[int] = []
     token_page: list[int] = []
 
@@ -334,12 +364,11 @@ def chunk_document(pages: list[tuple[int, str]], source: str, meta: dict) -> lis
     chunk_idx = 0
     while start < len(all_tokens):
         end = min(start + CHUNK_SIZE, len(all_tokens))
-        chunk_text = enc.decode(all_tokens[start:end])
         chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{start}"))
         chunks.append(
             {
                 "id": chunk_id,
-                "text": chunk_text,
+                "text": enc.decode(all_tokens[start:end]),
                 "source": source,
                 "page": token_page[start],
                 "chunk_index": chunk_idx,
@@ -351,8 +380,113 @@ def chunk_document(pages: list[tuple[int, str]], source: str, meta: dict) -> lis
     return chunks
 
 
+# ── Markdown chunking ─────────────────────────────────────────────────────────
+
+
+def chunk_markdown(text: str, source: str, meta: dict) -> list[dict]:
+    """Chunk a Markdown document by heading boundaries.
+
+    Falls back to fixed-stride when no headings are detected.
+    """
+    headings = [(m.start(), len(m.group(1)), m.group(2).strip()) for m in HEADING_RE.finditer(text)]
+
+    if not headings:
+        return _chunk_text_fixed(text, source, meta)
+
+    raw_sections = []
+    for i, (pos, level, title) in enumerate(headings):
+        end = headings[i + 1][0] if i + 1 < len(headings) else len(text)
+        body = text[pos:end].strip()
+        if body:
+            raw_sections.append({"title": title, "level": level, "text": body})
+
+    merged: list[dict] = []
+    buf_text = ""
+    buf_title = ""
+    buf_level = 1
+
+    for sec in raw_sections:
+        if buf_text:
+            buf_text += "\n\n" + sec["text"]
+        else:
+            buf_text = sec["text"]
+            buf_title = sec["title"]
+            buf_level = sec["level"]
+
+        if len(enc.encode(buf_text)) >= MIN_SECTION_TOKENS:
+            merged.append({"title": buf_title, "level": buf_level, "text": buf_text})
+            buf_text = ""
+
+    if buf_text:
+        if merged:
+            merged[-1]["text"] += "\n\n" + buf_text
+        else:
+            merged.append({"title": buf_title, "level": buf_level, "text": buf_text})
+
+    chunks: list[dict] = []
+    chunk_index = 0
+
+    for sec_idx, sec in enumerate(merged):
+        tokens = enc.encode(sec["text"])
+        title = sec["title"]
+        level = sec["level"]
+
+        sub_chunk = 0
+        start = 0
+        while start < len(tokens):
+            end = min(start + CHUNK_SIZE, len(tokens))
+            chunk_text = enc.decode(tokens[start:end])
+            if sub_chunk > 0:
+                chunk_text = f"{title}\n{chunk_text}"
+            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{title}:{sub_chunk}"))
+            chunks.append(
+                {
+                    "id": chunk_id,
+                    "text": chunk_text,
+                    "source": source,
+                    "page": 1,
+                    "chunk_index": chunk_index,
+                    "section_title": title,
+                    "section_level": level,
+                    "section_index": sec_idx,
+                    **meta,
+                }
+            )
+            start += CHUNK_SIZE - CHUNK_OVERLAP
+            sub_chunk += 1
+            chunk_index += 1
+
+    return chunks
+
+
+def _chunk_text_fixed(text: str, source: str, meta: dict) -> list[dict]:
+    """Fixed-stride chunking for plain text without structural markers."""
+    tokens = enc.encode(text)
+    chunks = []
+    start = 0
+    chunk_idx = 0
+    while start < len(tokens):
+        end = min(start + CHUNK_SIZE, len(tokens))
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{start}"))
+        chunks.append(
+            {
+                "id": chunk_id,
+                "text": enc.decode(tokens[start:end]),
+                "source": source,
+                "page": 1,
+                "chunk_index": chunk_idx,
+                **meta,
+            }
+        )
+        start += CHUNK_SIZE - CHUNK_OVERLAP
+        chunk_idx += 1
+    return chunks
+
+
+# ── Embedding + upsert ────────────────────────────────────────────────────────
+
+
 def _retry_after(exc: RateLimitError, default: float = 60.0) -> float:
-    """Parse the suggested wait time from an OpenAI rate-limit error message."""
     match = re.search(r"try again in (\d+(?:\.\d+)?)(ms|s)", str(exc))
     if match:
         value, unit = float(match.group(1)), match.group(2)
@@ -382,63 +516,13 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
     return chunks
 
 
-def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
-    file_size_mb = pdf_path.stat().st_size / 1_048_576
-
-    print(f"\n{'─' * 60}")
-    print(f"File:  {pdf_path.name}  ({file_size_mb:.1f} MB)")
-
-    if not force and already_ingested(pdf_path.name):
-        print("  Already ingested — skipping.  Use --force to re-ingest.")
-        return 0
-
-    meta = load_sidecar(pdf_path)
-    if meta:
-        parts = "  ".join(f"{k}={v}" for k, v in meta.items())
-        print(f"Meta:  {parts}")
-    else:
-        print("Meta:  (none — create a .json sidecar to add vendor/product/version/doc_type)")
-
-    if force:
-        delete_source_chunks(pdf_path.name)
-
-    t0 = time.monotonic()
-
-    doc = fitz.open(pdf_path)
-    pages = [(i + 1, page.get_text()) for i, page in enumerate(doc)]
-    non_empty = [(n, t) for n, t in pages if t.strip()]
-    print(f"Pages: {len(pages)} total, {len(non_empty)} with text")
-
-    if not non_empty:
-        print("  No extractable text — skipping.")
-        return 0
-
-    all_chunks = chunk_document_sections(doc, pdf_path.name, meta)
-    if not all_chunks:
-        reason = "No TOC detected" if all_chunks is None else "TOC found but no text extracted"
-        print(f"  {reason} — using fixed-stride chunking")
-        all_chunks = chunk_document(non_empty, pdf_path.name, meta)
-
-    num_batches = math.ceil(len(all_chunks) / EMBED_BATCH)
-    print(
-        f"Chunks: {len(all_chunks)}  ({num_batches} embedding batch{'es' if num_batches != 1 else ''})"
-    )
-
+def _upsert_chunks(all_chunks: list[dict], meta: dict) -> int:
+    """Embed, compute sparse vectors, and upsert chunks to Qdrant. Returns stored count."""
     all_chunks = embed_chunks(all_chunks)
-
     for chunk in all_chunks:
         chunk["sparse"] = compute_sparse(chunk["text"])
 
-    # Build payload: fixed fields + optional section fields + all metadata keys
-    payload_keys = {
-        "text",
-        "source",
-        "page",
-        "chunk_index",
-        "section_title",
-        "section_level",
-        "section_index",
-    } | set(meta.keys())
+    payload_keys = PAYLOAD_KEYS | set(meta.keys())
     points = [
         PointStruct(
             id=c["id"],
@@ -454,32 +538,135 @@ def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
             qdrant.upsert(collection_name=COLLECTION_NAME, points=points[i : i + UPSERT_BATCH])
             pbar.update(1)
 
-    elapsed = time.monotonic() - t0
-    print(f"Done:  {len(points)} chunks stored in {elapsed:.1f}s")
     return len(points)
 
 
+# ── Per-file ingest ───────────────────────────────────────────────────────────
+
+
+def ingest_pdf(pdf_path: Path, force: bool = False) -> int:
+    source = _source_id(pdf_path)
+    file_size_mb = pdf_path.stat().st_size / 1_048_576
+
+    print(f"\n{'─' * 60}")
+    print(f"File:  {pdf_path.name}  ({file_size_mb:.1f} MB)")
+
+    if not force and already_ingested(source):
+        print("  Already ingested — skipping.  Use --force to re-ingest.")
+        return 0
+
+    meta = load_sidecar(pdf_path)
+    if meta:
+        parts = "  ".join(f"{k}={v}" for k, v in meta.items())
+        print(f"Meta:  {parts}")
+    else:
+        print("Meta:  (none — create a .json sidecar to add vendor/product/version/doc_type)")
+
+    if force:
+        delete_source_chunks(source)
+
+    t0 = time.monotonic()
+
+    doc = fitz.open(pdf_path)
+    pages = [(i + 1, page.get_text()) for i, page in enumerate(doc)]
+    non_empty = [(n, t) for n, t in pages if t.strip()]
+    print(f"Pages: {len(pages)} total, {len(non_empty)} with text")
+
+    if not non_empty:
+        print("  No extractable text — skipping.")
+        return 0
+
+    all_chunks = chunk_document_sections(doc, source, meta)
+    if not all_chunks:
+        reason = "No TOC detected" if all_chunks is None else "TOC found but no text extracted"
+        print(f"  {reason} — using fixed-stride chunking")
+        all_chunks = chunk_document(non_empty, source, meta)
+
+    num_batches = math.ceil(len(all_chunks) / EMBED_BATCH)
+    print(
+        f"Chunks: {len(all_chunks)}  ({num_batches} embedding batch{'es' if num_batches != 1 else ''})"
+    )
+
+    count = _upsert_chunks(all_chunks, meta)
+    elapsed = time.monotonic() - t0
+    print(f"Done:  {count} chunks stored in {elapsed:.1f}s")
+    return count
+
+
+def ingest_markdown(md_path: Path, force: bool = False) -> int:
+    source = _source_id(md_path)
+    file_size_kb = md_path.stat().st_size / 1024
+
+    print(f"\n{'─' * 60}")
+    print(f"File:  {md_path.name}  ({file_size_kb:.1f} KB)  [markdown]")
+
+    if not force and already_ingested(source):
+        print("  Already ingested — skipping.  Use --force to re-ingest.")
+        return 0
+
+    meta = load_sidecar(md_path)
+    if meta:
+        parts = "  ".join(f"{k}={v}" for k, v in meta.items())
+        print(f"Meta:  {parts}")
+    else:
+        print("Meta:  (none — create a .json sidecar to add source_type/trust_tier/author)")
+
+    if force:
+        delete_source_chunks(source)
+
+    t0 = time.monotonic()
+
+    text = md_path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        print("  Empty file — skipping.")
+        return 0
+
+    all_chunks = chunk_markdown(text, source, meta)
+    num_batches = math.ceil(len(all_chunks) / EMBED_BATCH)
+    print(
+        f"Chunks: {len(all_chunks)}  ({num_batches} embedding batch{'es' if num_batches != 1 else ''})"
+    )
+
+    count = _upsert_chunks(all_chunks, meta)
+    elapsed = time.monotonic() - t0
+    print(f"Done:  {count} chunks stored in {elapsed:.1f}s")
+    return count
+
+
+# ── Watch loop ────────────────────────────────────────────────────────────────
+
+
 def watch_loop(interval: int = 30) -> None:
-    """Poll DOCS_DIR every `interval` seconds and ingest any new PDFs."""
-    print(f"Watching {DOCS_DIR} for new PDFs (polling every {interval}s) …")
-    print("Drop a PDF into ./docs/ and it will be ingested automatically.\n")
+    """Poll DOCS_DIR every `interval` seconds and ingest any new PDFs or Markdown files."""
+    print(f"Watching {DOCS_DIR} for new PDFs and Markdown files (polling every {interval}s) …")
+    print("Drop a .pdf or .md into ./docs/ and it will be ingested automatically.\n")
     ensure_collection()
     while True:
-        for pdf in sorted(DOCS_DIR.glob("**/*.pdf")):
-            if not already_ingested(pdf.name):
+        for path in sorted(DOCS_DIR.glob("**/*")):
+            suffix = path.suffix.lower()
+            if suffix not in (".pdf", ".md"):
+                continue
+            source = _source_id(path)
+            if not already_ingested(source):
                 try:
-                    ingest_pdf(pdf)
+                    if suffix == ".pdf":
+                        ingest_pdf(path)
+                    else:
+                        ingest_markdown(path)
                 except Exception as exc:
-                    print(f"  Error ingesting {pdf.name}: {exc} — will retry next cycle")
+                    print(f"  Error ingesting {path.name}: {exc} — will retry next cycle")
         time.sleep(interval)
 
 
+# ── CLI entry point ───────────────────────────────────────────────────────────
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Ingest PDFs into Qdrant")
+    parser = argparse.ArgumentParser(description="Ingest PDFs and Markdown files into Qdrant")
     parser.add_argument(
         "files",
         nargs="*",
-        help="Specific PDF files to ingest (default: all PDFs under DOCS_DIR)",
+        help="Specific files to ingest (default: all .pdf and .md files under DOCS_DIR)",
     )
     parser.add_argument(
         "--force",
@@ -489,7 +676,7 @@ def main():
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Watch DOCS_DIR continuously and ingest new PDFs as they appear",
+        help="Watch DOCS_DIR continuously and ingest new files as they appear",
     )
     args = parser.parse_args()
 
@@ -499,20 +686,29 @@ def main():
 
     ensure_collection()
 
-    targets = [Path(f) for f in args.files] if args.files else list(DOCS_DIR.glob("**/*.pdf"))
+    if args.files:
+        targets = [Path(f) for f in args.files]
+    else:
+        targets = sorted(list(DOCS_DIR.glob("**/*.pdf")) + list(DOCS_DIR.glob("**/*.md")))
 
     if not targets:
-        print(f"No PDFs found in {DOCS_DIR}")
+        print(f"No PDFs or Markdown files found in {DOCS_DIR}")
         sys.exit(0)
 
-    print(f"Found {len(targets)} PDF(s) to ingest")
+    print(f"Found {len(targets)} file(s) to ingest")
     if args.force:
         print("--force: deleting existing chunks before re-ingesting")
 
     wall_start = time.monotonic()
     total_chunks = 0
-    for pdf in targets:
-        total_chunks += ingest_pdf(pdf, force=args.force)
+    for path in targets:
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            total_chunks += ingest_pdf(path, force=args.force)
+        elif suffix == ".md":
+            total_chunks += ingest_markdown(path, force=args.force)
+        else:
+            print(f"  Skipping unsupported file type: {path.name}")
 
     wall_elapsed = time.monotonic() - wall_start
     print(f"\n{'═' * 60}")
