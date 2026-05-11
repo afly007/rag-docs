@@ -116,7 +116,7 @@ Firefox: go to `about:debugging#/runtime/this-firefox` → **Load Temporary Add-
 
 **Using it:**
 
-Browse to any page you want to save, click the extension icon, optionally tag it with a vendor and product (the dropdowns are pre-populated from your collection), and click **Save to Distill**. The page is fetched server-side, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
+Browse to any page you want to save, click the extension icon, optionally tag it with a vendor and product (the dropdowns are pre-populated from your collection), and click **Save to Distill**. The extension captures the already-rendered DOM and sends it to the server for chunking and embedding — this means JavaScript-rendered pages (vendor portals, SPAs like arista.com) clip correctly without a headless browser. A green confirmation shows the chunk count when done.
 
 Reddit links are automatically redirected to `old.reddit.com` for better text extraction — a blue notice in the popup confirms the rewrite.
 
@@ -234,7 +234,7 @@ Open `http://YOUR_SERVER_IP:8000/stats` for a live dashboard showing ingested do
 
 Open `http://YOUR_SERVER_IP:8000/inspect` to verify that documents were ingested correctly.
 
-**Source list** — all ingested sources (files and clipped URLs) with chunk count, vendor, product, and doc type. Any source with **2 or fewer chunks** is flagged with a ⚠ warning — this is the primary signal for a bad ingest (e.g. trafilatura failed to extract the page body, or a PDF had no text layer).
+**Source list** — all ingested sources (files and clipped URLs) with chunk count, vendor, product, and doc type. Any source with **2 or fewer chunks** is flagged with a ⚠ warning — this is the primary signal for a bad ingest (e.g. trafilatura failed to extract the page body, or a PDF had no text layer). Clipped URLs (http/https) show a **✕ delete button** — clicking it removes all chunks for that source from the index after confirmation. To delete file-based documents use the `/files` page instead.
 
 **Chunk detail view** — click any source row to see every chunk: chunk index, page number, section title (from PDF TOC), character count, and a 420-character text preview. Use this to confirm the actual extracted content makes sense.
 

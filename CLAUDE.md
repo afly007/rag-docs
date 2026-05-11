@@ -24,7 +24,7 @@ ingest/
 lib/
   ingest_core.py         — shared chunking/embedding helpers used by both ingest CLI and mcp-server file browser
 browser-extension/
-  manifest.json          — MV3, permissions: activeTab, storage, tabs
+  manifest.json          — MV3, permissions: activeTab, scripting, storage, tabs
   popup.html/js          — One-click save UI; auto-rewrites reddit.com → old.reddit.com
   options.html/js        — Server URL + API key settings; test connection button
 docs/                    — PDFs and JSON sidecars (gitignored, managed on server)
@@ -39,7 +39,7 @@ CONFIGURATION.md         — Configuration reference (env vars, TLS, MCP clients
 
 **AsyncOpenAI is required.** The sync client blocks the asyncio event loop, which starves the SSE keepalive and causes `Tool result could not be submitted` errors in Claude. Do not revert to `openai.OpenAI`.
 
-**mcp 1.27.0 uses the public API.** We previously hacked into FastMCP internals (`mcp._mcp_server`, `SseServerTransport`) to add a custom `/stats` route. This is no longer needed — use `@mcp.custom_route("/stats", methods=["GET"])` and `mcp.sse_app()` instead.
+**mcp 1.27.1 uses the public API.** We previously hacked into FastMCP internals (`mcp._mcp_server`, `SseServerTransport`) to add a custom `/stats` route. This is no longer needed — use `@mcp.custom_route("/stats", methods=["GET"])` and `mcp.sse_app()` instead.
 
 **UPSERT_BATCH=200 in ingest.** Qdrant rejects payloads over 32 MB. Batching at 200 points keeps each request well under the limit.
 
@@ -54,11 +54,15 @@ CONFIGURATION.md         — Configuration reference (env vars, TLS, MCP clients
 **Section-aware chunking uses the PDF's TOC as split boundaries.** `extract_toc_sections()` calls `doc.get_toc(simple=False)` to get bookmark entries with y-coordinates, then computes end boundaries by scanning forward for the next entry at the same or higher level. Only leaf sections (`has_children=False`) are chunked — parent headings are skipped because their text appears in child sections. Sections below `MIN_SECTION_TOKENS=100` are merged forward into the next section. Large sections use the same 750/100 sliding window, scoped within the section. Chunk IDs are `uuid5(NAMESPACE_URL, f"{source}:{section_title}:{sub_chunk_n}")` — stable to page reflow, version-correct when titles change. New payload fields: `section_title`, `section_level`, `section_index`. Falls back to fixed-stride when `get_toc()` returns empty. `delete_source_chunks()` is called on `--force` re-ingest so orphaned old-ID chunks are removed before new ones are upserted. Run `scripts/test_section_detect.py <pdf>` inside the ingest container to inspect TOC quality without touching Qdrant or OpenAI.
 
 **Browser extension clip endpoint (`/clip` + `/clip/meta`).**
-- `POST /clip` — CORS-enabled, Bearer token auth (`CLIP_API_KEY`), fetches the URL server-side via `_clip_fetch()`, chunks with `_clip_chunk()`, embeds, and upserts as trust_tier=4 community content. trafilatura runs in a thread pool executor (sync library in async server). Three-pass extraction: (1) strict trafilatura, (2) lenient `favor_recall=True`, (3) raw HTML tag strip — returning `None` only if all three yield < 200 chars.
+- `POST /clip` — CORS-enabled, Bearer token auth (`CLIP_API_KEY`). If the request body includes `html_content`, the server calls `_clip_extract(html, url)` directly on the provided HTML; otherwise it calls `_clip_fetch(url)` which fetches the URL server-side. Either path then calls `_clip_chunk()`, embeds, and upserts as trust_tier=4 community content. trafilatura runs in a thread pool executor (sync library in async server). Three-pass extraction: (1) strict trafilatura, (2) lenient `favor_recall=True`, (3) raw HTML tag strip — returning `None` only if all three yield < 200 chars.
+- `_clip_extract(html, url)` — pure extraction from an HTML string. `_clip_fetch(url)` is a thin wrapper that calls `trafilatura.fetch_url()` then `_clip_extract()`.
 - `GET /clip/meta` — scrolls full Qdrant collection (payload-only, no vectors) and returns sorted distinct `vendor` and `product` values for the extension's `<datalist>` dropdowns. Fast even on large collections since vectors are excluded.
 - `_clip_chunk()` splits on markdown headings first, then applies 750/100 sliding window per section. **Critical:** content before the first heading must be captured as a preamble section — if omitted, pages where a heading appears only near the end silently drop almost all content.
-- Reddit (`www.reddit.com`) serves JS-rendered HTML that trafilatura can't parse. The popup rewrites any `www.reddit.com`, `new.reddit.com`, or `sh.reddit.com` URL to `old.reddit.com` before POSTing to `/clip`. This is done client-side in popup.js — the server receives and fetches the `old.reddit.com` URL.
+- The extension captures the already-rendered DOM (`document.documentElement.outerHTML`) via `chrome.scripting.executeScript` and sends it as `html_content`. This handles JS-rendered pages (Arista, etc.) that return "JavaScript is disabled" when fetched server-side. Requires the `"scripting"` permission in `manifest.json`.
+- Reddit (`www.reddit.com`) serves JS-rendered HTML that trafilatura can't parse. The popup rewrites any `www.reddit.com`, `new.reddit.com`, or `sh.reddit.com` URL to `old.reddit.com` before POSTing to `/clip`, and skips the client-HTML capture for those URLs. The server receives and fetches the `old.reddit.com` URL directly.
 - `chrome.tabs.create()` requires the explicit `"tabs"` permission in Firefox MV3, even when opening your own extension page via `chrome.runtime.getURL()`. Without it the call silently does nothing.
+
+**Clip delete via `/inspect`.** `DELETE /inspect/source?source=<url>` removes all Qdrant chunks for that URL and clears the stats cache. Only HTTP/HTTPS sources are accepted (file-based documents are deleted via `/files/delete`). The `/inspect` page shows a ✕ button on URL rows; clicking it confirms, calls the endpoint, and removes the row client-side.
 
 **Watch mode polls DOCS_DIR every 30 seconds.** `watch_loop()` in `ingest.py` is triggered by `--watch`. It calls `already_ingested()` per file and catches per-file exceptions so a bad PDF doesn't kill the loop — it retries on the next cycle. The `ingest-watch` compose service (profile: `watch`) runs with `restart: unless-stopped`. Start with `make watch`, stop with `make watch-stop`.
 
@@ -186,8 +190,9 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | `RERANKER=local` fails with 404 on model download | Wrong model name — flashrank model names differ from sentence-transformers | Use `ms-marco-MiniLM-L-12-v2` not `ms-marco-MiniLM-L-6-v2`; valid names are in `flashrank.Config.model_file_map` |
 | Clip returns 1 chunk for most pages | `_clip_chunk()` heading path only captured text *from* headings, silently dropping all content before the first heading | Fixed — preamble section added before first heading; always verify with `docker exec mcp-server python3 -c "import trafilatura; ..."` |
 | Extension settings link does nothing in Firefox | `chrome.tabs.create()` silently fails without the `"tabs"` permission in Firefox MV3 | Add `"tabs"` to `permissions` array in `manifest.json` |
-| Clip returns "No extractable text" | Page is JS-rendered (React/Angular SPA) or has bot protection | Use three-pass fallback in `_clip_fetch()`; for true SPAs a headless browser would be required |
-| Reddit clips have near-empty content | `www.reddit.com` serves JS-rendered HTML | popup.js auto-rewrites to `old.reddit.com`; already-indexed bad clips must be deleted via Qdrant filter DELETE API |
+| Clip returns "No extractable text" | Page has bot protection or blocks all HTTP clients | Extension sends the rendered DOM via `html_content`; if that also fails, the page is actively blocking non-browser clients |
+| JS-rendered pages return "JavaScript is disabled" when clipped | trafilatura's server-side fetch doesn't execute JS | Fixed — extension captures `document.documentElement.outerHTML` and sends as `html_content`; server uses it directly instead of re-fetching |
+| Reddit clips have near-empty content | `www.reddit.com` serves JS-rendered HTML | popup.js auto-rewrites to `old.reddit.com` and skips client HTML capture; already-indexed bad clips can be deleted via the ✕ button on `/inspect` |
 | `vendor=aruba` filter returns no results | gen-sidecars tags HPE docs as `hewlett-packard-enterprise` | `_VENDOR_ALIASES` + `MatchAny` in `build_filter()` handles this — add new alias groups for other ambiguous vendor names |
 | Caddy CI build takes ~6 minutes | xcaddy compiles Go from source on first run | Normal — GitHub Actions caches the layer; subsequent builds are ~30s |
 | `tls internal` cert not trusted by browser/client | Caddy's root CA is not in the OS trust store | Export with `docker compose cp caddy:/data/pki/authorities/local/root.crt ./caddy-root.crt` and import into the OS/browser trust store on each client |
