@@ -694,32 +694,28 @@ _CLIP_CHUNK_SIZE = 750
 _CLIP_CHUNK_OVERLAP = 100
 
 
-def _clip_fetch(url: str) -> str | None:
-    """Fetch and extract main text from a URL. Runs in a thread pool (sync)."""
+def _clip_extract(html: str, url: str = "") -> str | None:
+    """Extract main text from an HTML string. Runs in a thread pool (sync)."""
     import trafilatura
 
-    downloaded = trafilatura.fetch_url(url)
-    if not downloaded:
-        return None
+    kwargs: dict = {"include_tables": True, "include_links": False, "output_format": "markdown"}
+    if url:
+        kwargs["url"] = url
 
-    text = trafilatura.extract(
-        downloaded,
-        include_tables=True,
-        include_links=False,
-        output_format="markdown",
-    )
+    text = trafilatura.extract(html, **kwargs)
     if text:
         return text
 
-    # Fallback: lenient extraction (include everything trafilatura finds)
+    # Fallback: lenient extraction
     text = trafilatura.extract(
-        downloaded,
+        html,
         include_tables=True,
         include_links=False,
         include_comments=True,
         no_fallback=False,
         favor_recall=True,
         output_format="markdown",
+        **({"url": url} if url else {}),
     )
     if text:
         return text
@@ -727,9 +723,19 @@ def _clip_fetch(url: str) -> str | None:
     # Last resort: strip HTML tags and return raw visible text
     import re as _re
 
-    raw = _re.sub(r"<[^>]+>", " ", downloaded)
+    raw = _re.sub(r"<[^>]+>", " ", html)
     raw = _re.sub(r"[ \t]{2,}", " ", raw).strip()
     return raw if len(raw) > 200 else None
+
+
+def _clip_fetch(url: str) -> str | None:
+    """Fetch a URL server-side and extract main text."""
+    import trafilatura
+
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        return None
+    return _clip_extract(downloaded, url)
 
 
 def _clip_chunk(text: str, source: str, meta: dict) -> list[dict]:
@@ -870,11 +876,22 @@ async def clip_handler(request):
     if val := (body.get("last_updated") or "").strip():
         meta["last_updated"] = val
 
-    log.info("clip url=%r  meta=%s", url, {k: v for k, v in meta.items() if k != "url"})
+    html_content = (body.get("html_content") or "").strip()
+    log.info(
+        "clip url=%r  html_provided=%s  meta=%s",
+        url,
+        bool(html_content),
+        {k: v for k, v in meta.items() if k != "url"},
+    )
 
     try:
         async with asyncio.timeout(60):
-            text = await asyncio.get_event_loop().run_in_executor(None, _clip_fetch, url)
+            if html_content:
+                text = await asyncio.get_event_loop().run_in_executor(
+                    None, _clip_extract, html_content, url
+                )
+            else:
+                text = await asyncio.get_event_loop().run_in_executor(None, _clip_fetch, url)
             if not text or not text.strip():
                 return JSONResponse(
                     {"error": "No extractable text found at that URL"},

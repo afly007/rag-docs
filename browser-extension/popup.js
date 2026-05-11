@@ -59,6 +59,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (vendor) body.vendor = vendor;
     if (product) body.product = product;
 
+    // Capture the already-rendered DOM so JS-gated pages (SPAs, login walls, etc.)
+    // are indexed correctly. Skip for Reddit — those are rewritten to old.reddit.com
+    // which the server fetches as plain HTML.
+    if (!redditRewrite) {
+      try {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => document.documentElement.outerHTML,
+        });
+        if (result) body.html_content = result;
+      } catch (_) {
+        // Tab doesn't allow script injection (e.g. browser built-in pages) — fall back to server fetch
+      }
+    }
+
     try {
       const resp = await fetch(`${serverUrl}/clip`, {
         method: "POST",
