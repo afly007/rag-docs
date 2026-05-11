@@ -579,4 +579,44 @@ To eliminate OpenAI API costs, swap `text-embedding-3-small` for a local model (
 
 ---
 
+## Security
+
+Distill is designed for self-hosted, private network deployment. The current security model treats **network isolation as the primary perimeter** — the server is not intended to be internet-facing.
+
+### Current state
+
+**Protected:**
+- `/clip` and `/clip/meta` require a `Bearer CLIP_API_KEY` header — the browser extension is the only authenticated endpoint
+- Qdrant write access is only possible via the `mcp-server` container; the Qdrant port is not reachable from outside the host without LAN access
+- The query log (SQLite) lives inside a Docker volume and is not directly accessible
+
+**Not yet protected (known gaps, tracked as GitHub issues):**
+
+| Gap | Risk | Issue |
+|---|---|---|
+| MCP SSE endpoint (`/sse`) is unauthenticated | Any LAN host can call all MCP tools | [#56](https://github.com/afly007/distill/issues/56) |
+| `/stats` page is unauthenticated | Exposes document catalog and full query history | [#57](https://github.com/afly007/distill/issues/57) |
+| Qdrant port 6333 bound to host | Any LAN host can read, write, or delete the collection directly | [#58](https://github.com/afly007/distill/issues/58) |
+| `/clip` fetches any URL without SSRF protection | Can be used to probe internal services | [#59](https://github.com/afly007/distill/issues/59) |
+| No rate limiting on `/clip` | Bulk requests can exhaust OpenAI API credits | [#60](https://github.com/afly007/distill/issues/60) |
+| All traffic is plaintext HTTP | API keys and queries travel unencrypted on the network | [#61](https://github.com/afly007/distill/issues/61) |
+| Browser extension `host_permissions` is `["http://*/*", "https://*/*"]` | Broader than necessary | [#62](https://github.com/afly007/distill/issues/62) |
+| CORS on `/clip` allows all origins | Any page can trigger clip requests if the key is known | [#63](https://github.com/afly007/distill/issues/63) |
+
+### Intended future state
+
+The target posture for a hardened deployment:
+
+- **MCP and stats authentication** — Bearer token on `/sse` and `/stats`, configured via `.env`
+- **Qdrant port unexposed** — bind to `127.0.0.1` only; all Qdrant access via the mcp-server container
+- **SSRF protection** — block private IP ranges and loopback in `_clip_fetch()` before making outbound requests
+- **Rate limiting** — per-IP request cap on `/clip` to prevent API credit exhaustion
+- **TLS** — HTTPS via a reverse proxy (nginx/Caddy) with a self-signed or internal CA certificate; remove the need for `--allow-http` in MCP client configs
+- **Narrowed CORS** — restrict `/clip` to the server's own origin rather than `*`
+- **Narrowed extension permissions** — scope `host_permissions` to only the configured server URL
+
+For deployments outside a trusted private network, addressing the authentication and TLS gaps is strongly recommended before exposing the server to additional users.
+
+---
+
 *Built with AI assistance using [Claude Code](https://claude.ai/code). Architecture, code, and documentation developed collaboratively.*
