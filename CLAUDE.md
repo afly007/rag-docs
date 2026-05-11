@@ -11,13 +11,18 @@ Runs on a remote Ubuntu server with 750 GB RAM at `192.168.0.50`. The user is a 
 ## Repo layout
 
 ```
-docker-compose.yml       — Qdrant + mcp-server + ingest (ingest is profile-gated)
+docker-compose.yml       — Qdrant + mcp-server + ingest (ingest and tls are profile-gated)
+caddy/
+  Dockerfile             — xcaddy custom build with 4 DNS plugins (cloudflare, route53, acmedns, digitalocean)
+  entrypoint.sh          — generates Caddyfile from TLS_MODE/TLS_DOMAIN/TLS_DNS_PROVIDER at startup
 mcp-server/
-  server.py              — FastMCP SSE server, search_docs, list_docs, stats page, SQLite log, /clip endpoint
+  server.py              — FastMCP SSE server, search_docs, list_docs, stats page, file browser, SQLite log, /clip endpoint
   requirements.txt
 ingest/
   ingest.py              — PDF → chunks → embeddings → Qdrant
   requirements.txt
+lib/
+  ingest_core.py         — shared chunking/embedding helpers used by both ingest CLI and mcp-server file browser
 browser-extension/
   manifest.json          — MV3, permissions: activeTab, storage, tabs
   popup.html/js          — One-click save UI; auto-rewrites reddit.com → old.reddit.com
@@ -26,6 +31,7 @@ docs/                    — PDFs and JSON sidecars (gitignored, managed on serv
 scripts/deploy.sh        — Manual deploy helper
 pyproject.toml           — ruff config
 Makefile                 — Common tasks (see `make help`)
+CONFIGURATION.md         — Full operational configuration reference (env vars, TLS, clients, sidecar format)
 ```
 
 ## Architecture decisions
@@ -57,22 +63,31 @@ Makefile                 — Common tasks (see `make help`)
 
 **Vendor aliases expand search across acquisition name variants.** `_VENDOR_ALIASES` in `server.py` maps equivalent names (e.g. `aruba`, `hpe`, `hewlett-packard-enterprise`, `arubanetworks`) to the same group. `build_filter()` uses `MatchAny` instead of `MatchValue` so a user searching `vendor=aruba` finds docs tagged `hewlett-packard-enterprise` by gen-sidecars. Add new alias groups when vendor naming is ambiguous.
 
+**File browser uses shared `lib/ingest_core.py`.** Both the CLI ingestor (`ingest/ingest.py`) and the MCP server's file browser upload handler (`_ingest_file_bg`) import chunking logic from `lib/ingest_core.py`. This module is pure computation — no I/O clients, no tqdm, no print statements. CLI-specific concerns (sync OpenAI client, progress bars, rate-limit retry) stay in `ingest.py`; async concerns (AsyncOpenAI, asyncio.create_task) stay in `server.py`. Both Dockerfiles use root build context (`context: .`) so `COPY lib/ lib/` works.
+
+**Caddy TLS proxy is an optional Docker Compose profile.** `COMPOSE_PROFILES=tls` in `.env` starts the `caddy` service alongside the core stack. `TLS_MODE=internal` uses Caddy's built-in CA (self-signed; clients must import the root cert once). `TLS_MODE=dns` uses Let's Encrypt via DNS-01 challenge (universally trusted; requires domain + DNS provider API key). The custom Caddy image is built with xcaddy and includes four DNS plugins: cloudflare, route53, acmedns, digitalocean. `caddy/entrypoint.sh` generates the Caddyfile at container startup from env vars and validates required variables before starting Caddy. Port 8000 on mcp-server stays exposed so direct HTTP access continues working when TLS is enabled. See `CONFIGURATION.md` for full setup instructions.
+
 ## Critical constraints
 
-### mcp-remote requires --allow-http
+### mcp-remote requires --allow-http (HTTP only)
 
-The Claude Desktop config must include `--allow-http` in the args array or mcp-remote will refuse non-HTTPS non-localhost URLs:
+The Claude Desktop config must include `--allow-http` in the args array or mcp-remote will refuse non-HTTPS non-localhost URLs. This flag is **not needed** when TLS is enabled — use the `https://` URL without it:
 
 ```json
-{
-  "mcpServers": {
-    "distill": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://192.168.0.50:8000/sse", "--allow-http"]
-    }
-  }
-}
+{ "mcpServers": { "distill": { "command": "npx",
+    "args": ["-y", "mcp-remote", "http://192.168.0.50:8000/sse", "--allow-http"] } } }
 ```
+
+With TLS (`COMPOSE_PROFILES=tls`):
+```json
+{ "mcpServers": { "distill": { "command": "npx",
+    "args": ["-y", "mcp-remote", "https://distill.yourdomain.com/sse"] } } }
+```
+
+### GHCR caddy package must be made public after first push
+
+After the first release workflow run that pushes the caddy image, make it public at:
+`https://github.com/users/afly007/packages/container/distill%2Fcaddy/settings`
 
 ### GHCR image path includes repo name
 
@@ -173,6 +188,12 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | Clip returns "No extractable text" | Page is JS-rendered (React/Angular SPA) or has bot protection | Use three-pass fallback in `_clip_fetch()`; for true SPAs a headless browser would be required |
 | Reddit clips have near-empty content | `www.reddit.com` serves JS-rendered HTML | popup.js auto-rewrites to `old.reddit.com`; already-indexed bad clips must be deleted via Qdrant filter DELETE API |
 | `vendor=aruba` filter returns no results | gen-sidecars tags HPE docs as `hewlett-packard-enterprise` | `_VENDOR_ALIASES` + `MatchAny` in `build_filter()` handles this — add new alias groups for other ambiguous vendor names |
+| Caddy CI build takes ~6 minutes | xcaddy compiles Go from source on first run | Normal — GitHub Actions caches the layer; subsequent builds are ~30s |
+| `tls internal` cert not trusted by browser/client | Caddy's root CA is not in the OS trust store | Export with `docker compose cp caddy:/data/pki/authorities/local/root.crt ./caddy-root.crt` and import into the OS/browser trust store on each client |
+| DNS challenge fails: `no such host` or `NXDOMAIN` | DNS record for `TLS_DOMAIN` doesn't exist or hasn't propagated | Add an A record pointing to the server IP; wait for propagation before starting Caddy |
+| `TLS_DNS_PROVIDER` not set but `TLS_MODE=dns` | entrypoint.sh validates and exits with an error message | Set `TLS_DNS_PROVIDER` to one of: cloudflare, route53, acmedns, digitalocean |
+| File browser upload has no metadata after ingest | Sidecars are generated separately — upload only chunks and embeds | Use the ✦ button on the PDF row to auto-generate metadata, then save |
+| trust_tier missing from chunks after collection recreate | Old sidecars created before gen_sidecar.py didn't include `trust_tier` | Use `jq '. + {"trust_tier":1,"source_type":"vendor-doc"}' old.json > new.json` to patch, then `make ingest-force` |
 
 ## Embedding model
 
@@ -225,3 +246,5 @@ Priority-ordered. Items marked **quality** improve search results; **infra** are
 | 2 | ~~**Deploy secrets**~~ | ✅ Done — self-hosted runner on server, `GHCR_TOKEN` secret configured. Merges to main auto-deploy. |
 | 3 | ~~**SSE keepalive**~~ | ✅ Done — `functools.partial(EventSourceResponse, ping=30)` injected before `sse_app()`. Sends SSE comment pings every 30s to reset router idle timers. |
 | 4 | ~~**PR #3**~~ (`docker/build-push-action 5→7`) | ✅ Merged. |
+| 5 | ~~**TLS / reverse proxy**~~ | ✅ Done — Caddy optional service (`COMPOSE_PROFILES=tls`). `TLS_MODE=internal` for self-signed CA; `TLS_MODE=dns` for Let's Encrypt via DNS-01. Supports cloudflare, route53, acmedns, digitalocean. See `CONFIGURATION.md`. |
+| 6 | ~~**File browser**~~ | ✅ Done — `/files` page for upload, delete, download, sidecar editing. ✦ button auto-generates metadata via GPT-4o-mini. Shared chunking via `lib/ingest_core.py`. |
