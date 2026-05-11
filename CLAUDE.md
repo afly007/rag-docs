@@ -31,7 +31,8 @@ docs/                    — PDFs and JSON sidecars (gitignored, managed on serv
 scripts/deploy.sh        — Manual deploy helper
 pyproject.toml           — ruff config
 Makefile                 — Common tasks (see `make help`)
-CONFIGURATION.md         — Full operational configuration reference (env vars, TLS, clients, sidecar format)
+USAGE.md                 — Operational usage guide (adding docs, searching, day-to-day ops, development)
+CONFIGURATION.md         — Configuration reference (env vars, TLS, MCP clients, sidecar format)
 ```
 
 ## Architecture decisions
