@@ -27,35 +27,30 @@ jobs:
         run: ruff format --check .
 
   build:
-    name: Build Docker images
+    name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: ingest
+            context: .
+            file: ingest/Dockerfile
+          - name: mcp-server
+            context: .
+            file: mcp-server/Dockerfile
+          - name: caddy
+            context: caddy
+            file: caddy/Dockerfile
     steps:
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build ingest
+      - name: Build
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: ingest/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build mcp-server
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: mcp-server/Dockerfile
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build caddy
-        uses: docker/build-push-action@v7
-        with:
-          context: caddy
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
