@@ -599,7 +599,7 @@ Distill is designed for self-hosted, private network deployment. The current sec
 | Qdrant port 6333 bound to host | Any LAN host can read, write, or delete the collection directly | [#58](https://github.com/afly007/distill/issues/58) |
 | `/clip` fetches any URL without SSRF protection | Can be used to probe internal services | [#59](https://github.com/afly007/distill/issues/59) |
 | No rate limiting on `/clip` | Bulk requests can exhaust OpenAI API credits | [#60](https://github.com/afly007/distill/issues/60) |
-| All traffic is plaintext HTTP | API keys and queries travel unencrypted on the network | [#61](https://github.com/afly007/distill/issues/61) |
+| All traffic is plaintext HTTP (without Caddy) | API keys and queries travel unencrypted when TLS proxy is not enabled | [#61](https://github.com/afly007/distill/issues/61) |
 | Browser extension `host_permissions` is `["http://*/*", "https://*/*"]` | Broader than necessary | [#62](https://github.com/afly007/distill/issues/62) |
 | CORS on `/clip` allows all origins | Any page can trigger clip requests if the key is known | [#63](https://github.com/afly007/distill/issues/63) |
 
@@ -611,11 +611,11 @@ The target posture for a hardened deployment:
 - **Qdrant port unexposed** — bind to `127.0.0.1` only; all Qdrant access via the mcp-server container
 - **SSRF protection** — block private IP ranges and loopback in `_clip_fetch()` before making outbound requests
 - **Rate limiting** — per-IP request cap on `/clip` to prevent API credit exhaustion
-- **TLS** — HTTPS via a reverse proxy (nginx/Caddy) with a self-signed or internal CA certificate; remove the need for `--allow-http` in MCP client configs
+- **TLS** ✅ — Caddy reverse proxy included (`COMPOSE_PROFILES=tls`). Supports internal CA and Let's Encrypt DNS challenge. See [CONFIGURATION.md](CONFIGURATION.md#tls-setup).
 - **Narrowed CORS** — restrict `/clip` to the server's own origin rather than `*`
 - **Narrowed extension permissions** — scope `host_permissions` to only the configured server URL
 
-For deployments outside a trusted private network, addressing the authentication and TLS gaps is strongly recommended before exposing the server to additional users.
+For deployments outside a trusted private network, enabling TLS (see [CONFIGURATION.md](CONFIGURATION.md#tls-setup)) and addressing the remaining authentication gaps is strongly recommended before exposing the server to additional users.
 
 ---
 
