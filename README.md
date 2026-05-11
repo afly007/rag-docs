@@ -39,10 +39,10 @@ MCP (Model Context Protocol) is the standard interface for connecting AI assista
 - **Trust-tier content model** — vendor docs, validated designs, internal notes, and community references are kept separate and retrieved with independent controls
 - **Re-ranking** — optional cross-encoder pass over the top 20 candidates (local flashrank or Cohere API)
 - **Auto-metadata generation** — GPT-4o-mini classifies vendor, product, version, and doc type from the first 10 pages
-- **Browser extension** — one-click save any web page to the community tier from Chrome or Firefox
+- **Browser extension** — one-click save any web page to the community tier from Chrome or Firefox; captures the already-rendered DOM so JavaScript-rendered pages (SPAs, vendor portals) clip correctly
 - **File browser** — web UI for upload, metadata editing, and document management without SSH access
 - **Stats dashboard** — live query log, coverage gaps, latency tracking, and top sources
-- **Chunk inspector** — per-source chunk viewer for verifying ingestion quality; flags sources with suspiciously few chunks
+- **Chunk inspector** — per-source chunk viewer for verifying ingestion quality; flags sources with suspiciously few chunks; one-click delete for clipped URLs
 - **Watch mode** — background watcher ingests new files as you drop them in
 - **TLS reverse proxy** — optional Caddy proxy with security hardening (HTTPS, response headers, rate limiting, basic auth)
 - **MCP server** — SSE transport; works with Claude Code (native SSE), Claude Desktop (via mcp-remote), Cursor, Windsurf
