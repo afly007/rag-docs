@@ -37,7 +37,8 @@ jobs:
       - name: Build ingest
         uses: docker/build-push-action@v7
         with:
-          context: ./ingest
+          context: .
+          file: ingest/Dockerfile
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -45,7 +46,8 @@ jobs:
       - name: Build mcp-server
         uses: docker/build-push-action@v7
         with:
-          context: ./mcp-server
+          context: .
+          file: mcp-server/Dockerfile
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

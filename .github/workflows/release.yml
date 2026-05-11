@@ -48,7 +48,8 @@ jobs:
       - name: Build and push mcp-server
         uses: docker/build-push-action@v7
         with:
-          context: ./mcp-server
+          context: .
+          file: mcp-server/Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.mcp_tags }}
           cache-from: type=gha
@@ -57,7 +58,8 @@ jobs:
       - name: Build and push ingest
         uses: docker/build-push-action@v7
         with:
-          context: ./ingest
+          context: .
+          file: ingest/Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.ingest_tags }}
           cache-from: type=gha
