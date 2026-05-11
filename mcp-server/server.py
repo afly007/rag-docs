@@ -2345,7 +2345,9 @@ def _render_inspect_page() -> str:
         document.getElementById("chunk-tbody").innerHTML = rows;
         document.getElementById("chunk-table").style.display = "";
       } catch (err) {
-        document.getElementById("chunk-loading").textContent = "Error loading chunks: " + err.message;
+        const loadEl = document.getElementById("chunk-loading");
+        loadEl.style.display = "";
+        loadEl.textContent = "Error loading chunks: " + err.message;
       }
     }
 
@@ -2391,7 +2393,9 @@ def _render_inspect_page() -> str:
         document.getElementById("source-tbody").innerHTML = rows;
         document.getElementById("source-table").style.display = "";
       } catch (err) {
-        document.getElementById("list-loading").textContent = "Error loading sources: " + err.message;
+        const loadEl = document.getElementById("list-loading");
+        loadEl.style.display = "";
+        loadEl.textContent = "Error loading sources: " + err.message;
       }
     }
 
