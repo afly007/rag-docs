@@ -2214,6 +2214,10 @@ _INSPECT_CSS = """
                  text-decoration: underline; text-underline-offset: 2px; }
     .warn-link:hover { color: #e3b341; }
 
+    .del-btn { background: none; border: none; cursor: pointer; color: #8b949e;
+               font-size: .8rem; font-family: inherit; padding: 0 0 0 8px; opacity: .6; }
+    .del-btn:hover { color: #f85149; opacity: 1; }
+
     table { width: 100%; border-collapse: collapse; font-size: .78rem; }
     thead th { text-align: left; padding: 8px 10px; color: #484f58;
                text-transform: uppercase; font-size: .65rem; letter-spacing: .07em;
@@ -2315,6 +2319,29 @@ def _render_inspect_page() -> str:
       history.pushState(null, "", "/inspect");
     }
 
+    async function deleteSource(source, rowEl) {
+      if (!confirm("Delete all chunks for this source?\\n\\n" + source)) return;
+      rowEl.style.opacity = "0.4";
+      try {
+        const resp = await fetch("/inspect/source?source=" + encodeURIComponent(source), { method: "DELETE" });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          alert("Delete failed: " + (data.error || resp.status));
+          rowEl.style.opacity = "";
+          return;
+        }
+        rowEl.remove();
+        // If table is now empty, show placeholder
+        const tbody = document.getElementById("source-tbody");
+        if (!tbody.querySelector("tr")) {
+          tbody.innerHTML = `<tr><td colspan="6" class="empty">No documents ingested yet.</td></tr>`;
+        }
+      } catch (err) {
+        alert("Delete failed: " + err.message);
+        rowEl.style.opacity = "";
+      }
+    }
+
     async function showSource(source) {
       listView.style.display   = "none";
       detailView.style.display = "block";
@@ -2397,13 +2424,16 @@ def _render_inspect_page() -> str:
           const warnBtn = s.chunks <= 2
             ? `<button class="warn-link" onclick='event.stopPropagation();showSource(${srcJson})'>⚠ check content</button>`
             : "";
+          const delBtn = isUrl
+            ? `<button class="del-btn" onclick='event.stopPropagation();deleteSource(${srcJson},this.closest("tr"))' title="Delete">✕</button>`
+            : "";
           return `<tr onclick='showSource(${srcJson})'>
             <td class="src">${label}${warn}</td>
             <td class="num">${s.chunks}</td>
             <td class="meta">${esc(s.vendor || "—")}</td>
             <td class="meta">${esc(s.product || "—")}</td>
             <td class="meta">${esc(s.doc_type || "—")}</td>
-            <td class="warn">${warnBtn}</td>
+            <td class="warn">${warnBtn}${delBtn}</td>
           </tr>`;
         }).join("");
 
@@ -2493,6 +2523,31 @@ async def inspect_chunks_handler(request):
             "doc_type": meta.get("doc_type"),
         }
     )
+
+
+@mcp.custom_route("/inspect/source", methods=["DELETE", "POST"])
+async def inspect_delete_handler(request):
+    source = request.query_params.get("source", "")
+    if not source:
+        return JSONResponse({"error": "'source' query param required"}, status_code=400)
+    if not (source.startswith("http://") or source.startswith("https://")):
+        return JSONResponse({"error": "Only URL sources can be deleted here"}, status_code=400)
+
+    try:
+        qdrant.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=FilterSelector(
+                filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=source))])
+            ),
+            wait=True,
+        )
+    except Exception as exc:
+        log.warning("qdrant delete error for %r: %s", source, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    _qdrant_cache["at"] = 0.0
+    log.info("clip deleted source=%r", source)
+    return JSONResponse({"deleted": source})
 
 
 # ── App assembly ──────────────────────────────────────────────────────────────
