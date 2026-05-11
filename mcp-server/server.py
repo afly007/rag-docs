@@ -1252,7 +1252,11 @@ def _render_files_page() -> str:
     table { width: 100%; border-collapse: collapse; font-size: .78rem; }
     thead th { text-align: left; padding: 8px 10px; color: #484f58;
                text-transform: uppercase; font-size: .65rem; letter-spacing: .07em;
-               border-bottom: 1px solid #21262d; }
+               border-bottom: 1px solid #21262d; user-select: none; }
+    thead th[data-col] { cursor: pointer; }
+    thead th[data-col]:hover { color: #8b949e; }
+    thead th.sort-asc::after  { content: " ▲"; color: #58a6ff; }
+    thead th.sort-desc::after { content: " ▼"; color: #58a6ff; }
     tbody tr { border-bottom: 1px solid #161b22; }
     tbody tr:hover { background: #161b22; }
     td { padding: 8px 10px; vertical-align: middle; }
@@ -1328,11 +1332,11 @@ def _render_files_page() -> str:
     <table>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Size</th>
-          <th>Modified</th>
-          <th>Chunks</th>
-          <th>Metadata</th>
+          <th data-col="name">Name</th>
+          <th data-col="size">Size</th>
+          <th data-col="modified">Modified</th>
+          <th data-col="chunks">Chunks</th>
+          <th data-col="meta">Metadata</th>
           <th></th>
         </tr>
       </thead>
@@ -1402,6 +1406,9 @@ def _render_files_page() -> str:
   <script>
     let _currentSidecarPath = null;
     let _pollTimer = null;
+    let _allFiles = [];
+    let _sortCol = "name";
+    let _sortAsc = true;
 
     function fmtSize(b) {
       if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
@@ -1423,15 +1430,27 @@ def _render_files_page() -> str:
       return parts.join(" · ") || "—";
     }
 
-    async function loadFiles() {
-      const resp = await fetch("/files/list");
-      const files = await resp.json();
+    function sortKey(f, col) {
+      if (col === "name")     return f.name.toLowerCase();
+      if (col === "size")     return f.size;
+      if (col === "modified") return f.modified;
+      if (col === "chunks")   return f.chunks;
+      if (col === "meta")     return fmtMeta(f.meta).toLowerCase();
+      return "";
+    }
+
+    function renderFiles() {
       const tbody = document.getElementById("file-tbody");
-      if (!files.length) {
+      if (!_allFiles.length) {
         tbody.innerHTML = '<tr><td colspan="6" class="empty">No documents yet — upload a PDF or Markdown file to get started.</td></tr>';
         return;
       }
-      tbody.innerHTML = files.map(f => {
+      const sorted = [..._allFiles].sort((a, b) => {
+        const ka = sortKey(a, _sortCol), kb = sortKey(b, _sortCol);
+        const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+        return _sortAsc ? cmp : -cmp;
+      });
+      tbody.innerHTML = sorted.map(f => {
         const badge = `<span class="badge badge-${f.type}">.${f.type}</span>`;
         const metaStr = fmtMeta(f.meta);
         const metaTitle = JSON.stringify(f.meta, null, 2);
@@ -1448,7 +1467,29 @@ def _render_files_page() -> str:
           </td>
         </tr>`;
       }).join("");
+      document.querySelectorAll("thead th[data-col]").forEach(th => {
+        th.classList.toggle("sort-asc",  th.dataset.col === _sortCol && _sortAsc);
+        th.classList.toggle("sort-desc", th.dataset.col === _sortCol && !_sortAsc);
+      });
     }
+
+    async function loadFiles() {
+      const resp = await fetch("/files/list");
+      _allFiles = await resp.json();
+      renderFiles();
+    }
+
+    document.querySelectorAll("thead th[data-col]").forEach(th => {
+      th.addEventListener("click", () => {
+        if (_sortCol === th.dataset.col) {
+          _sortAsc = !_sortAsc;
+        } else {
+          _sortCol = th.dataset.col;
+          _sortAsc = true;
+        }
+        renderFiles();
+      });
+    });
 
     function escHtml(s) {
       return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
