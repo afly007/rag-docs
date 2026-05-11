@@ -74,6 +74,37 @@ services:
     profiles:
       - watch
 
+  caddy:
+    build:
+      context: caddy
+    image: ${IMAGE_BASE:-local}/caddy:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - TLS_MODE=${TLS_MODE:-internal}
+      - TLS_DOMAIN=${TLS_DOMAIN:-distill.local}
+      - TLS_DNS_PROVIDER=${TLS_DNS_PROVIDER:-}
+      # Cloudflare
+      - CF_API_TOKEN=${CF_API_TOKEN:-}
+      # Route53 (uses AWS SDK credential chain; also accepts AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      # ACME-DNS
+      - ACMEDNS_HOST=${ACMEDNS_HOST:-}
+      # DigitalOcean
+      - DO_AUTH_TOKEN=${DO_AUTH_TOKEN:-}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - mcp-server
+    restart: unless-stopped
+    profiles:
+      - tls
+
 volumes:
   qdrant_data:
   mcp_data:
+  caddy_data:
+  caddy_config:
