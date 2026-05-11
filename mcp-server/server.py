@@ -1403,6 +1403,7 @@ def _render_files_page() -> str:
     <nav>
       <a href="/files" class="active">Files</a>
       <a href="/stats">Stats</a>
+      <a href="/inspect">Inspect</a>
     </nav>
   </header>
 
@@ -2063,6 +2064,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
     <nav>
       <a href="/files">Files</a>
       <a href="/stats" class="active">Stats</a>
+      <a href="/inspect">Inspect</a>
     </nav>
   </header>
   <main>
@@ -2152,6 +2154,306 @@ async def stats_handler(request):
     with _active_lock:
         active_snapshot = dict(_active)
     return HTMLResponse(render_stats(collect_qdrant_stats(), active_snapshot))
+
+
+# ── Chunk inspector ───────────────────────────────────────────────────────────
+
+_INSPECT_CSS = """
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+           background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+
+    header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+             border-bottom: 1px solid #21262d; }
+    header h1 { font-size: .9rem; color: #58a6ff; letter-spacing: .04em; flex: 1; }
+    header nav { display: flex; gap: 6px; }
+    header nav a { font-size: .75rem; color: #484f58; text-decoration: none;
+                   padding: 4px 10px; border: 1px solid #30363d; border-radius: 6px; }
+    header nav a:hover { color: #c9d1d9; border-color: #58a6ff; }
+    header nav a.active { color: #c9d1d9; border-color: #58a6ff; background: #1f2d45; }
+
+    main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+    #list-view, #detail-view { }
+    #detail-view { display: none; }
+
+    h2 { font-size: .85rem; color: #8b949e; margin-bottom: 14px;
+         text-transform: uppercase; letter-spacing: .06em; }
+
+    .back-btn { background: none; border: 1px solid #30363d; color: #8b949e;
+                font-family: inherit; font-size: .75rem; padding: 5px 12px;
+                border-radius: 6px; cursor: pointer; margin-bottom: 18px; }
+    .back-btn:hover { color: #c9d1d9; border-color: #58a6ff; }
+
+    .detail-header { margin-bottom: 18px; }
+    .detail-source { font-size: .82rem; color: #79c0ff; word-break: break-all; }
+    .detail-meta   { font-size: .72rem; color: #484f58; margin-top: 4px; }
+
+    .warn-badge { display: inline-block; background: #2d1f00; color: #d29922;
+                  border: 1px solid #d2992240; font-size: .65rem; padding: 1px 7px;
+                  border-radius: 10px; margin-left: 8px; vertical-align: middle; }
+
+    table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    thead th { text-align: left; padding: 8px 10px; color: #484f58;
+               text-transform: uppercase; font-size: .65rem; letter-spacing: .07em;
+               border-bottom: 1px solid #21262d; }
+    tbody tr { border-bottom: 1px solid #161b22; cursor: pointer; }
+    tbody tr:hover { background: #161b22; }
+    td { padding: 8px 10px; vertical-align: top; }
+    td.src { color: #79c0ff; max-width: 340px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; font-size: .78rem; }
+    td.num { color: #8b949e; text-align: right; white-space: nowrap; }
+    td.meta { color: #8b949e; font-size: .72rem; }
+    td.warn { color: #d29922; font-size: .72rem; white-space: nowrap; }
+    td.section { color: #8b949e; font-size: .72rem; max-width: 200px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    td.preview { color: #c9d1d9; font-size: .75rem; line-height: 1.55;
+                 white-space: pre-wrap; word-break: break-word; max-width: 560px; }
+
+    .empty { color: #484f58; font-size: .82rem; padding: 32px 0; text-align: center; }
+    .loading { color: #484f58; font-size: .82rem; padding: 16px 0; }
+"""
+
+
+def _render_inspect_page() -> str:
+    return (
+        """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Distill — Inspect</title>
+  <style>"""
+        + _INSPECT_CSS
+        + """  </style>
+</head>
+<body>
+  <header>
+    <h1>&#9673; Distill</h1>
+    <nav>
+      <a href="/files">Files</a>
+      <a href="/stats">Stats</a>
+      <a href="/inspect" class="active">Inspect</a>
+    </nav>
+  </header>
+  <main>
+
+    <!-- Source list -->
+    <div id="list-view">
+      <h2>Ingested sources</h2>
+      <div id="list-loading" class="loading">Loading…</div>
+      <table id="source-table" style="display:none">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th style="text-align:right">Chunks</th>
+            <th>Vendor</th>
+            <th>Product</th>
+            <th>Type</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="source-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Chunk detail -->
+    <div id="detail-view">
+      <button class="back-btn" onclick="showList()">&#8592; Back to sources</button>
+      <div class="detail-header">
+        <div class="detail-source" id="detail-source"></div>
+        <div class="detail-meta" id="detail-meta"></div>
+      </div>
+      <div id="chunk-loading" class="loading" style="display:none">Loading chunks…</div>
+      <table id="chunk-table" style="display:none">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Page</th>
+            <th>Section</th>
+            <th>Chars</th>
+            <th>Preview</th>
+          </tr>
+        </thead>
+        <tbody id="chunk-tbody"></tbody>
+      </table>
+    </div>
+
+  </main>
+  <script>
+    const listView   = document.getElementById("list-view");
+    const detailView = document.getElementById("detail-view");
+
+    function esc(s) {
+      return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
+                            .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function showList() {
+      detailView.style.display = "none";
+      listView.style.display   = "";
+      history.pushState(null, "", "/inspect");
+    }
+
+    async function showSource(source) {
+      listView.style.display   = "none";
+      detailView.style.display = "";
+      history.pushState(null, "", "/inspect?source=" + encodeURIComponent(source));
+
+      document.getElementById("detail-source").textContent = source;
+      document.getElementById("detail-meta").textContent   = "";
+      document.getElementById("chunk-table").style.display = "none";
+      document.getElementById("chunk-loading").style.display = "";
+
+      const res    = await fetch("/inspect/chunks?source=" + encodeURIComponent(source));
+      const data   = await res.json();
+      const chunks = data.chunks;
+
+      document.getElementById("chunk-loading").style.display = "none";
+
+      const metaParts = [`${chunks.length} chunk${chunks.length !== 1 ? "s" : ""}`];
+      if (data.vendor)   metaParts.push("vendor=" + data.vendor);
+      if (data.product)  metaParts.push("product=" + data.product);
+      if (data.doc_type) metaParts.push(data.doc_type);
+      document.getElementById("detail-meta").textContent = metaParts.join("  ·  ");
+
+      if (chunks.length === 0) {
+        const tb = document.getElementById("chunk-tbody");
+        tb.innerHTML = `<tr><td colspan="5" class="empty">No chunks found for this source.</td></tr>`;
+        document.getElementById("chunk-table").style.display = "";
+        return;
+      }
+
+      const rows = chunks.map(c => {
+        const preview = (c.text || "").slice(0, 420);
+        const section = c.section_title || "—";
+        const page    = c.page != null ? c.page : "—";
+        return `<tr>
+          <td class="num">${c.chunk_index ?? "—"}</td>
+          <td class="num">${page}</td>
+          <td class="section" title="${esc(c.section_title)}">${esc(section)}</td>
+          <td class="num">${(c.text || "").length}</td>
+          <td class="preview">${esc(preview)}</td>
+        </tr>`;
+      }).join("");
+
+      document.getElementById("chunk-tbody").innerHTML = rows;
+      document.getElementById("chunk-table").style.display = "";
+    }
+
+    async function loadList() {
+      const res  = await fetch("/inspect/list");
+      const data = await res.json();
+      const sources = data.sources;
+
+      document.getElementById("list-loading").style.display = "none";
+
+      if (!sources || sources.length === 0) {
+        document.getElementById("source-table").style.display = "";
+        document.getElementById("source-tbody").innerHTML =
+          `<tr><td colspan="6" class="empty">No documents ingested yet.</td></tr>`;
+        return;
+      }
+
+      const rows = sources.map(s => {
+        const warn   = s.chunks <= 2
+          ? `<span class="warn-badge">⚠ ${s.chunks} chunk${s.chunks > 1 ? "s" : ""}</span>` : "";
+        const isUrl  = s.source.startsWith("http://") || s.source.startsWith("https://");
+        const label  = isUrl
+          ? `<a href="${esc(s.source)}" target="_blank" rel="noopener"
+                style="color:#79c0ff;text-decoration:none"
+                title="${esc(s.source)}">${esc(s.source.replace(/^https?:\\/\\//, "").slice(0, 60))}</a>`
+          : `<span title="${esc(s.source)}">${esc(s.source)}</span>`;
+        return `<tr onclick="showSource(${JSON.stringify(s.source)})">
+          <td class="src">${label}${warn}</td>
+          <td class="num">${s.chunks}</td>
+          <td class="meta">${esc(s.vendor || "—")}</td>
+          <td class="meta">${esc(s.product || "—")}</td>
+          <td class="meta">${esc(s.doc_type || "—")}</td>
+          <td class="warn">${s.chunks <= 2 ? "⚠ check content" : ""}</td>
+        </tr>`;
+      }).join("");
+
+      document.getElementById("source-tbody").innerHTML = rows;
+      document.getElementById("source-table").style.display = "";
+    }
+
+    // Support direct link to a source via ?source= param
+    const urlSource = new URLSearchParams(location.search).get("source");
+    if (urlSource) {
+      showSource(urlSource);
+    } else {
+      loadList();
+    }
+  </script>
+</body>
+</html>"""
+    )
+
+
+@mcp.custom_route("/inspect", methods=["GET"])
+async def inspect_handler(request):
+    source = request.query_params.get("source")
+    if source:
+        return HTMLResponse(_render_inspect_page())
+    return HTMLResponse(_render_inspect_page())
+
+
+@mcp.custom_route("/inspect/list", methods=["GET"])
+async def inspect_list_handler(request):
+    stats = collect_qdrant_stats()
+    if "error" in stats:
+        return JSONResponse({"error": stats["error"]}, status_code=503)
+    sources = [{"source": src, **meta} for src, meta in stats["sources"].items()]
+    return JSONResponse({"sources": sources})
+
+
+@mcp.custom_route("/inspect/chunks", methods=["GET"])
+async def inspect_chunks_handler(request):
+    source = request.query_params.get("source", "")
+    if not source:
+        return JSONResponse({"error": "source param required"}, status_code=400)
+
+    chunks = []
+    offset = None
+    while True:
+        results, offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="source", match=MatchValue(value=source))]
+            ),
+            limit=500,
+            offset=offset,
+            with_vectors=False,
+            with_payload=["text", "chunk_index", "page", "section_title", "section_level"],
+        )
+        for pt in results:
+            p = pt.payload
+            chunks.append(
+                {
+                    "chunk_index": p.get("chunk_index"),
+                    "page": p.get("page"),
+                    "section_title": p.get("section_title"),
+                    "section_level": p.get("section_level"),
+                    "text": p.get("text", ""),
+                }
+            )
+        if offset is None:
+            break
+
+    chunks.sort(key=lambda c: (c["chunk_index"] is None, c["chunk_index"] or 0))
+
+    # Pull top-level metadata from stats cache (already loaded)
+    meta = collect_qdrant_stats().get("sources", {}).get(source, {})
+
+    return JSONResponse(
+        {
+            "source": source,
+            "chunks": chunks,
+            "vendor": meta.get("vendor"),
+            "product": meta.get("product"),
+            "doc_type": meta.get("doc_type"),
+        }
+    )
 
 
 # ── App assembly ──────────────────────────────────────────────────────────────
