@@ -12,11 +12,23 @@ env:
 
 jobs:
   push:
-    name: Build and push images
+    name: Push ${{ matrix.name }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - name: mcp-server
+            context: .
+            file: mcp-server/Dockerfile
+          - name: ingest
+            context: .
+            file: ingest/Dockerfile
+          - name: caddy
+            context: caddy
+            file: caddy/Dockerfile
 
     steps:
       - uses: actions/checkout@v6
@@ -34,47 +46,25 @@ jobs:
         id: tags
         run: |
           BASE="${{ env.IMAGE_BASE }}"
+          NAME="${{ matrix.name }}"
           SHA="${{ github.sha }}"
           REF="${{ github.ref }}"
           if [[ "$REF" == refs/tags/v* ]]; then
             VERSION="${REF#refs/tags/}"
-            echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${VERSION},${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
-            echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${VERSION},${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
-            echo "caddy_tags=${BASE}/caddy:latest,${BASE}/caddy:${VERSION},${BASE}/caddy:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "value=${BASE}/${NAME}:latest,${BASE}/${NAME}:${VERSION},${BASE}/${NAME}:${SHA}" >> "$GITHUB_OUTPUT"
           else
-            echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
-            echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
-            echo "caddy_tags=${BASE}/caddy:latest,${BASE}/caddy:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "value=${BASE}/${NAME}:latest,${BASE}/${NAME}:${SHA}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and push mcp-server
+      - name: Build and push
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: mcp-server/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
-          tags: ${{ steps.tags.outputs.mcp_tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push ingest
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ingest/Dockerfile
-          push: true
-          tags: ${{ steps.tags.outputs.ingest_tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push caddy
-        uses: docker/build-push-action@v7
-        with:
-          context: caddy
-          push: true
-          tags: ${{ steps.tags.outputs.caddy_tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
   deploy:
     name: Deploy to server
