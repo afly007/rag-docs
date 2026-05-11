@@ -51,3 +51,11 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build caddy
+        uses: docker/build-push-action@v7
+        with:
+          context: caddy
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

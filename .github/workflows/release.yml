@@ -40,9 +40,11 @@ jobs:
             VERSION="${REF#refs/tags/}"
             echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${VERSION},${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
             echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${VERSION},${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "caddy_tags=${BASE}/caddy:latest,${BASE}/caddy:${VERSION},${BASE}/caddy:${SHA}" >> "$GITHUB_OUTPUT"
           else
             echo "mcp_tags=${BASE}/mcp-server:latest,${BASE}/mcp-server:${SHA}" >> "$GITHUB_OUTPUT"
             echo "ingest_tags=${BASE}/ingest:latest,${BASE}/ingest:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "caddy_tags=${BASE}/caddy:latest,${BASE}/caddy:${SHA}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push mcp-server
@@ -65,6 +67,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push caddy
+        uses: docker/build-push-action@v7
+        with:
+          context: caddy
+          push: true
+          tags: ${{ steps.tags.outputs.caddy_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
     name: Deploy to server
     needs: push
@@ -78,6 +89,7 @@ jobs:
           git pull https://github.com/afly007/distill.git main
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u afly007 --password-stdin
           docker compose pull
-          docker compose pull ingest
+          docker compose --profile ingest pull ingest
+          docker compose --profile tls pull caddy 2>/dev/null || true
           docker compose up -d
           docker image prune -f
