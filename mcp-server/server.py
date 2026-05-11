@@ -2262,7 +2262,7 @@ def _render_inspect_page() -> str:
     </div>
 
     <!-- Chunk detail -->
-    <div id="detail-view">
+    <div id="detail-view" style="display:none">
       <button class="back-btn" onclick="showList()">&#8592; Back to sources</button>
       <div class="detail-header">
         <div class="detail-source" id="detail-source"></div>
@@ -2309,81 +2309,91 @@ def _render_inspect_page() -> str:
       document.getElementById("chunk-table").style.display = "none";
       document.getElementById("chunk-loading").style.display = "";
 
-      const res    = await fetch("/inspect/chunks?source=" + encodeURIComponent(source));
-      const data   = await res.json();
-      const chunks = data.chunks;
+      try {
+        const res    = await fetch("/inspect/chunks?source=" + encodeURIComponent(source));
+        if (!res.ok) throw new Error("Server returned " + res.status);
+        const data   = await res.json();
+        const chunks = data.chunks || [];
 
-      document.getElementById("chunk-loading").style.display = "none";
+        document.getElementById("chunk-loading").style.display = "none";
 
-      const metaParts = [`${chunks.length} chunk${chunks.length !== 1 ? "s" : ""}`];
-      if (data.vendor)   metaParts.push("vendor=" + data.vendor);
-      if (data.product)  metaParts.push("product=" + data.product);
-      if (data.doc_type) metaParts.push(data.doc_type);
-      document.getElementById("detail-meta").textContent = metaParts.join("  ·  ");
+        const metaParts = [`${chunks.length} chunk${chunks.length !== 1 ? "s" : ""}`];
+        if (data.vendor)   metaParts.push("vendor=" + data.vendor);
+        if (data.product)  metaParts.push("product=" + data.product);
+        if (data.doc_type) metaParts.push(data.doc_type);
+        document.getElementById("detail-meta").textContent = metaParts.join("  ·  ");
 
-      if (chunks.length === 0) {
-        const tb = document.getElementById("chunk-tbody");
-        tb.innerHTML = `<tr><td colspan="5" class="empty">No chunks found for this source.</td></tr>`;
+        if (chunks.length === 0) {
+          const tb = document.getElementById("chunk-tbody");
+          tb.innerHTML = `<tr><td colspan="5" class="empty">No chunks found for this source.</td></tr>`;
+          document.getElementById("chunk-table").style.display = "";
+          return;
+        }
+
+        const rows = chunks.map(c => {
+          const preview = (c.text || "").slice(0, 420);
+          const section = c.section_title || "—";
+          const page    = c.page != null ? c.page : "—";
+          return `<tr>
+            <td class="num">${c.chunk_index ?? "—"}</td>
+            <td class="num">${page}</td>
+            <td class="section" title="${esc(c.section_title)}">${esc(section)}</td>
+            <td class="num">${(c.text || "").length}</td>
+            <td class="preview">${esc(preview)}</td>
+          </tr>`;
+        }).join("");
+
+        document.getElementById("chunk-tbody").innerHTML = rows;
         document.getElementById("chunk-table").style.display = "";
-        return;
+      } catch (err) {
+        document.getElementById("chunk-loading").textContent = "Error loading chunks: " + err.message;
       }
-
-      const rows = chunks.map(c => {
-        const preview = (c.text || "").slice(0, 420);
-        const section = c.section_title || "—";
-        const page    = c.page != null ? c.page : "—";
-        return `<tr>
-          <td class="num">${c.chunk_index ?? "—"}</td>
-          <td class="num">${page}</td>
-          <td class="section" title="${esc(c.section_title)}">${esc(section)}</td>
-          <td class="num">${(c.text || "").length}</td>
-          <td class="preview">${esc(preview)}</td>
-        </tr>`;
-      }).join("");
-
-      document.getElementById("chunk-tbody").innerHTML = rows;
-      document.getElementById("chunk-table").style.display = "";
     }
 
     async function loadList() {
-      const res  = await fetch("/inspect/list");
-      const data = await res.json();
-      const sources = data.sources;
+      try {
+        const res  = await fetch("/inspect/list");
+        if (!res.ok) throw new Error("Server returned " + res.status);
+        const data = await res.json();
+        const sources = data.sources;
 
-      document.getElementById("list-loading").style.display = "none";
+        document.getElementById("list-loading").style.display = "none";
 
-      if (!sources || sources.length === 0) {
+        if (!sources || sources.length === 0) {
+          document.getElementById("source-table").style.display = "";
+          document.getElementById("source-tbody").innerHTML =
+            `<tr><td colspan="6" class="empty">No documents ingested yet.</td></tr>`;
+          return;
+        }
+
+        const rows = sources.map(s => {
+          const warn   = s.chunks <= 2
+            ? `<span class="warn-badge">⚠ ${s.chunks} chunk${s.chunks > 1 ? "s" : ""}</span>` : "";
+          const isUrl  = s.source.startsWith("http://") || s.source.startsWith("https://");
+          const label  = isUrl
+            ? `<a href="${esc(s.source)}" target="_blank" rel="noopener"
+                  style="color:#79c0ff;text-decoration:none"
+                  title="${esc(s.source)}">${esc(s.source.replace(/^https?:\\/\\//, "").slice(0, 60))}</a>`
+            : `<span title="${esc(s.source)}">${esc(s.source)}</span>`;
+          const srcJson = JSON.stringify(s.source);
+          const warnBtn = s.chunks <= 2
+            ? `<button class="warn-link" onclick='event.stopPropagation();showSource(${srcJson})'>⚠ check content</button>`
+            : "";
+          return `<tr onclick='showSource(${srcJson})'>
+            <td class="src">${label}${warn}</td>
+            <td class="num">${s.chunks}</td>
+            <td class="meta">${esc(s.vendor || "—")}</td>
+            <td class="meta">${esc(s.product || "—")}</td>
+            <td class="meta">${esc(s.doc_type || "—")}</td>
+            <td class="warn">${warnBtn}</td>
+          </tr>`;
+        }).join("");
+
+        document.getElementById("source-tbody").innerHTML = rows;
         document.getElementById("source-table").style.display = "";
-        document.getElementById("source-tbody").innerHTML =
-          `<tr><td colspan="6" class="empty">No documents ingested yet.</td></tr>`;
-        return;
+      } catch (err) {
+        document.getElementById("list-loading").textContent = "Error loading sources: " + err.message;
       }
-
-      const rows = sources.map(s => {
-        const warn   = s.chunks <= 2
-          ? `<span class="warn-badge">⚠ ${s.chunks} chunk${s.chunks > 1 ? "s" : ""}</span>` : "";
-        const isUrl  = s.source.startsWith("http://") || s.source.startsWith("https://");
-        const label  = isUrl
-          ? `<a href="${esc(s.source)}" target="_blank" rel="noopener"
-                style="color:#79c0ff;text-decoration:none"
-                title="${esc(s.source)}">${esc(s.source.replace(/^https?:\\/\\//, "").slice(0, 60))}</a>`
-          : `<span title="${esc(s.source)}">${esc(s.source)}</span>`;
-        const srcJson = JSON.stringify(s.source);
-        const warnBtn = s.chunks <= 2
-          ? `<button class="warn-link" onclick='event.stopPropagation();showSource(${srcJson})'>⚠ check content</button>`
-          : "";
-        return `<tr onclick='showSource(${srcJson})'>
-          <td class="src">${label}${warn}</td>
-          <td class="num">${s.chunks}</td>
-          <td class="meta">${esc(s.vendor || "—")}</td>
-          <td class="meta">${esc(s.product || "—")}</td>
-          <td class="meta">${esc(s.doc_type || "—")}</td>
-          <td class="warn">${warnBtn}</td>
-        </tr>`;
-      }).join("");
-
-      document.getElementById("source-tbody").innerHTML = rows;
-      document.getElementById("source-table").style.display = "";
     }
 
     // Support direct link to a source via ?source= param
