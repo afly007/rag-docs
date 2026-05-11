@@ -1300,7 +1300,6 @@ def _render_files_page() -> str:
 <head>
   <meta charset="utf-8">
   <title>Distill — Files</title>
-  <meta http-equiv="refresh" content="0; url=/files#">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
