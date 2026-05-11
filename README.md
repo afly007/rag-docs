@@ -7,6 +7,39 @@
 
 ---
 
+## Contents
+
+- [The problem](#the-problem)
+- [What RAG does](#what-rag-does-and-what-distill-is)
+- [Why an MCP server](#why-an-mcp-server)
+- [How it works](#how-it-works)
+- [What you can search](#what-you-can-search)
+- [Quick start](#quick-start)
+- [Adding documents](#adding-documents)
+  - [Vendor PDFs](#vendor-pdfs)
+  - [Internal Markdown notes](#internal-markdown-notes)
+  - [Curated web pages](#curated-web-pages)
+  - [Browser extension](#browser-extension-one-click-save-from-any-webpage)
+  - [Auto-ingest watch](#auto-ingest-watch)
+- [Talking to your AI](#talking-to-your-ai)
+- [What documents do I have?](#what-documents-do-i-have)
+- [Upgrading an existing collection](#upgrading-an-existing-collection)
+
+**Reference**
+
+- [Environment variables](#environment-variables)
+- [Connecting your AI client](#connecting-your-ai-client)
+- [Day-to-day operations](#day-to-day-operations)
+- [Managing multiple document sets](#managing-multiple-document-sets)
+- [Stats dashboard](#stats-dashboard)
+- [Metadata reference](#metadata-reference)
+- [CI/CD](#cicd)
+- [Development](#development)
+- [Switching to local embeddings](#switching-to-local-embeddings)
+- [Security](#security)
+
+---
+
 ## The problem
 
 AI assistants are remarkably capable — until you ask about your specific environment. The firmware version you're running. The vendor feature that shipped six months after the training cutoff. The internal design doc your team wrote last quarter. The obscure CLI flag that's documented in a 900-page PDF nobody reads.
