@@ -1167,6 +1167,92 @@ async def files_download_handler(request):
     )
 
 
+_GEN_SIDECAR_SYSTEM = """\
+You are a technical documentation classifier for network vendor PDFs.
+Given text from the first pages of a PDF plus its filename, extract metadata and return JSON.
+
+Fields:
+  vendor      — lowercase vendor name (e.g. "cisco", "juniper", "arista", "palo-alto", "fortinet", "nokia", "hpe")
+  product     — lowercase product or OS name (e.g. "ios-xe", "junos", "eos", "pan-os", "sr-os", "aos-cx")
+  version     — version string if clearly visible (e.g. "17.9.1", "23.2R1", "4.28.0") or null
+  doc_type    — one of: cli-reference, config-guide, design-guide, validated-design, release-notes,
+                white-paper, datasheet, or null
+  trust_tier  — integer: 1 for standard vendor documentation; 2 for vendor-published validated or
+                recommended designs (CVDs, Validated Solution Guides, reference architectures); null if uncertain
+  source_type — one of: "vendor-doc" for standard documentation; "validated-design" for CVDs and
+                validated solution guides; null if uncertain
+
+Classification guidance for trust_tier and source_type:
+- Set trust_tier=2 and source_type=validated-design for: HPE Aruba Validated Solution Guides,
+  Cisco CVDs, Juniper reference architectures, and any document titled "Validated Design",
+  "Reference Architecture", "Solution Guide", "CVD", or similar.
+- Set trust_tier=1 and source_type=vendor-doc for standard CLI references, configuration guides,
+  release notes, white papers, and datasheets.
+- Set doc_type=validated-design when the document is a CVD or validated solution guide.
+
+Return ONLY a JSON object with exactly these six keys. Use null for any field you cannot determine with confidence.\
+"""
+
+_GEN_SIDECAR_SCAN_PAGES = 10
+_GEN_SIDECAR_TEXT_CAP = 8_000
+_GEN_SIDECAR_MODEL = "gpt-4o-mini"
+
+
+async def _gen_sidecar_async(path: Path) -> dict:
+    """Extract first-page text from a PDF and call GPT-4o-mini to classify it."""
+    import re
+
+    doc = fitz.open(str(path))
+    parts = []
+    for i, page in enumerate(doc):
+        if i >= _GEN_SIDECAR_SCAN_PAGES:
+            break
+        text = page.get_text().strip()
+        if text:
+            parts.append(text)
+    text = "\n\n".join(parts)[:_GEN_SIDECAR_TEXT_CAP]
+    if not text:
+        return {}
+
+    resp = await openai_client.chat.completions.create(
+        model=_GEN_SIDECAR_MODEL,
+        response_format={"type": "json_object"},
+        temperature=0,
+        messages=[
+            {"role": "system", "content": _GEN_SIDECAR_SYSTEM},
+            {"role": "user", "content": f"Filename: {path.name}\n\n{text}"},
+        ],
+    )
+    raw = json.loads(resp.choices[0].message.content)
+    result = {}
+    for k, v in raw.items():
+        if v is None:
+            continue
+        s = str(v).lower()
+        if k == "version":
+            s = re.sub(r"(\.[xX]+)+$", "", s)
+        result[k] = s
+    return result
+
+
+@mcp.custom_route("/files/gen-sidecar", methods=["GET"])
+async def files_gen_sidecar_handler(request):
+    rel = request.query_params.get("path", "")
+    if not rel:
+        return JSONResponse({"error": "'path' query param required"}, status_code=400)
+    target = _safe_path(rel)
+    if target is None or not target.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    if target.suffix.lower() != ".pdf":
+        return JSONResponse({"error": "Auto-metadata only supported for PDFs"}, status_code=400)
+    try:
+        meta = await _gen_sidecar_async(target)
+    except Exception as exc:
+        log.exception("gen-sidecar failed path=%r", str(target))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(meta)
+
+
 @mcp.custom_route("/files/sidecar", methods=["GET", "PUT"])
 async def files_sidecar_handler(request):
     rel = request.query_params.get("path", "")
@@ -1462,6 +1548,7 @@ def _render_files_page() -> str:
           <td class="meta" title="${escHtml(metaTitle)}">${escHtml(metaStr)}</td>
           <td class="actions">
             <button onclick="downloadFile('${escAttr(f.path)}')" title="Download">&#8595;</button>
+            ${f.type === "pdf" ? `<button onclick="genMeta('${escAttr(f.path)}')" title="Auto-generate metadata">&#10022;</button>` : ""}
             <button onclick="openSidecar('${escAttr(f.path)}')" title="Edit metadata">&#9998;</button>
             <button class="del" onclick="deleteFile('${escAttr(f.path)}', '${escAttr(f.name)}')" title="Delete">&#10005;</button>
           </td>
@@ -1576,12 +1663,10 @@ def _render_files_page() -> str:
 
     // ── Sidecar modal ──
 
-    async function openSidecar(path) {
+    function _fillModal(path, meta) {
       _currentSidecarPath = path;
       document.getElementById("modal-title").textContent =
         "Edit Metadata — " + path.split("/").pop();
-      const resp = await fetch("/files/sidecar?path=" + encodeURIComponent(path));
-      const meta = await resp.json();
       document.getElementById("m-vendor").value = meta.vendor || "";
       document.getElementById("m-product").value = meta.product || "";
       document.getElementById("m-version").value = meta.version || "";
@@ -1589,6 +1674,26 @@ def _render_files_page() -> str:
       document.getElementById("m-tier").value = String(meta.trust_tier || "1");
       document.getElementById("m-source-type").value = meta.source_type || "vendor-doc";
       document.getElementById("modal-overlay").classList.add("open");
+    }
+
+    async function openSidecar(path) {
+      const resp = await fetch("/files/sidecar?path=" + encodeURIComponent(path));
+      const meta = await resp.json();
+      _fillModal(path, meta);
+    }
+
+    async function genMeta(path) {
+      // Find the ✦ button that was clicked and show a spinner on it
+      const btn = document.querySelector(`button[onclick="genMeta('${path.replace(/'/g, "\\'")}')"]`);
+      if (btn) { btn.textContent = "…"; btn.disabled = true; }
+      try {
+        const resp = await fetch("/files/gen-sidecar?path=" + encodeURIComponent(path));
+        const meta = await resp.json();
+        if (meta.error) { alert("Auto-generate failed: " + meta.error); return; }
+        _fillModal(path, meta);
+      } finally {
+        if (btn) { btn.textContent = "✦"; btn.disabled = false; }
+      }
     }
 
     document.getElementById("modal-cancel").addEventListener("click", () => {
