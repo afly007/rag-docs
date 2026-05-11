@@ -2294,19 +2294,19 @@ def _render_inspect_page() -> str:
 
     function showList() {
       detailView.style.display = "none";
-      listView.style.display   = "";
+      listView.style.display   = "block";
       history.pushState(null, "", "/inspect");
     }
 
     async function showSource(source) {
       listView.style.display   = "none";
-      detailView.style.display = "";
+      detailView.style.display = "block";
       history.pushState(null, "", "/inspect?source=" + encodeURIComponent(source));
 
       document.getElementById("detail-source").textContent = source;
       document.getElementById("detail-meta").textContent   = "";
       document.getElementById("chunk-table").style.display = "none";
-      document.getElementById("chunk-loading").style.display = "";
+      document.getElementById("chunk-loading").style.display = "block";
 
       try {
         const res    = await fetch("/inspect/chunks?source=" + encodeURIComponent(source));
@@ -2346,7 +2346,7 @@ def _render_inspect_page() -> str:
         document.getElementById("chunk-table").style.display = "";
       } catch (err) {
         const loadEl = document.getElementById("chunk-loading");
-        loadEl.style.display = "";
+        loadEl.style.display = "block";
         loadEl.textContent = "Error loading chunks: " + err.message;
       }
     }
@@ -2394,7 +2394,7 @@ def _render_inspect_page() -> str:
         document.getElementById("source-table").style.display = "";
       } catch (err) {
         const loadEl = document.getElementById("list-loading");
-        loadEl.style.display = "";
+        loadEl.style.display = "block";
         loadEl.textContent = "Error loading sources: " + err.message;
       }
     }
