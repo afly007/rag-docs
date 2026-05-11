@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Operational reference for deploying and configuring Distill. For a conceptual overview see [README.md](README.md).
+Operational reference for deploying and configuring Distill. For a conceptual overview see [README.md](README.md); for day-to-day usage see [USAGE.md](USAGE.md).
 
 ---
 
