@@ -29,7 +29,7 @@ from tqdm import tqdm
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "distill")
 DOCS_DIR = Path(os.environ.get("DOCS_DIR", "/docs"))
 
 EMBEDDING_MODEL = "text-embedding-3-small"

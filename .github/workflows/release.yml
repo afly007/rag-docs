@@ -71,9 +71,9 @@ jobs:
 
     steps:
       - name: Pull and restart
-        working-directory: /home/castrov/rag-docs
+        working-directory: /home/castrov/distill
         run: |
-          git pull https://github.com/afly007/rag-docs.git main
+          git pull https://github.com/afly007/distill.git main
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u afly007 --password-stdin
           docker compose pull
           docker compose pull ingest

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run on the server to pull the latest images and restart services.
 # Triggered automatically by the release workflow, or run manually:
-#   ssh user@server '~/rag-docs/scripts/deploy.sh'
+#   ssh user@server '~/distill/scripts/deploy.sh'
 
 set -euo pipefail
 

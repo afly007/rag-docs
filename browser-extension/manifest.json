@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Network Docs Clipper",
+  "name": "Distill Clipper",
   "version": "1.0.0",
-  "description": "Save the current page to your Network Docs RAG server with one click.",
+  "description": "Save the current page to your Distill knowledge base with one click.",
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Save to Network Docs"
+    "default_title": "Save to Distill"
   },
   "options_ui": {
     "page": "options.html",
