@@ -15,6 +15,7 @@ Operational guide for day-to-day use of Distill. For initial setup and configura
   - [Auto-ingest watch](#auto-ingest-watch)
 - [Talking to your AI](#talking-to-your-ai)
 - [What documents do I have?](#what-documents-do-i-have)
+- [Inspecting ingestion quality](#inspecting-ingestion-quality)
 - [Upgrading an existing collection](#upgrading-an-existing-collection)
 - [Day-to-day operations](#day-to-day-operations)
 - [Managing multiple document sets](#managing-multiple-document-sets)
@@ -226,6 +227,25 @@ AI:     [calls list_docs()]
 ```
 
 Open `http://YOUR_SERVER_IP:8000/stats` for a live dashboard showing ingested documents, recent queries, coverage gaps, and latency.
+
+---
+
+## Inspecting ingestion quality
+
+Open `http://YOUR_SERVER_IP:8000/inspect` to verify that documents were ingested correctly.
+
+**Source list** — all ingested sources (files and clipped URLs) with chunk count, vendor, product, and doc type. Any source with **2 or fewer chunks** is flagged with a ⚠ warning — this is the primary signal for a bad ingest (e.g. trafilatura failed to extract the page body, or a PDF had no text layer).
+
+**Chunk detail view** — click any source row to see every chunk: chunk index, page number, section title (from PDF TOC), character count, and a 420-character text preview. Use this to confirm the actual extracted content makes sense.
+
+Common causes of 1-chunk results from web clips:
+- JavaScript-rendered pages (React/Angular SPAs) — trafilatura can't parse them
+- Pages with aggressive bot protection
+- Very short articles where the entire text fits in one chunk (this is fine)
+
+For PDFs, very few chunks may indicate a scanned document without a text layer. Check the preview text — if it's garbled or empty, the PDF needs OCR preprocessing.
+
+> If `COMPOSE_PROFILES=tls` and `ADMIN_USER` is set, the `/inspect` page requires basic auth credentials.
 
 ---
 

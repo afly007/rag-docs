@@ -42,6 +42,7 @@ MCP (Model Context Protocol) is the standard interface for connecting AI assista
 - **Browser extension** — one-click save any web page to the community tier from Chrome or Firefox
 - **File browser** — web UI for upload, metadata editing, and document management without SSH access
 - **Stats dashboard** — live query log, coverage gaps, latency tracking, and top sources
+- **Chunk inspector** — per-source chunk viewer for verifying ingestion quality; flags sources with suspiciously few chunks
 - **Watch mode** — background watcher ingests new files as you drop them in
 - **TLS reverse proxy** — optional Caddy proxy with security hardening (HTTPS, response headers, rate limiting, basic auth)
 - **MCP server** — SSE transport; works with Claude Code (native SSE), Claude Desktop (via mcp-remote), Cursor, Windsurf
@@ -161,9 +162,9 @@ Distill is designed for self-hosted, private network deployment. The current sec
 
 | Gap | Risk | Issue |
 |---|---|---|
-| MCP SSE endpoint (`/sse`) is unauthenticated | Any LAN host can call all MCP tools | [#56](https://github.com/afly007/distill/issues/56) |
-| `/stats` and `/files` unauthenticated by default | Exposes document catalog and full query history without Caddy or without ADMIN_USER set | [#57](https://github.com/afly007/distill/issues/57) |
-| `/clip` fetches any URL without SSRF protection | Can be used to probe internal services | [#59](https://github.com/afly007/distill/issues/59) |
+| MCP SSE endpoint (`/sse`) is unauthenticated | Any LAN host can call all MCP tools | [#58](https://github.com/afly007/distill/issues/58) |
+| `/stats` and `/files` unauthenticated by default | Exposes document catalog and full query history without Caddy or without ADMIN_USER set | [#59](https://github.com/afly007/distill/issues/59) |
+| `/clip` fetches any URL without SSRF protection | Can be used to probe internal services | [#56](https://github.com/afly007/distill/issues/56) |
 | Browser extension `host_permissions` is `["http://*/*", "https://*/*"]` | Broader than necessary | [#62](https://github.com/afly007/distill/issues/62) |
 | CORS on `/clip` allows all origins | Any page can trigger clip requests if the key is known | [#63](https://github.com/afly007/distill/issues/63) |
 

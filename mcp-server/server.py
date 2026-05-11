@@ -2193,6 +2193,11 @@ _INSPECT_CSS = """
                   border: 1px solid #d2992240; font-size: .65rem; padding: 1px 7px;
                   border-radius: 10px; margin-left: 8px; vertical-align: middle; }
 
+    .warn-link { background: none; border: none; cursor: pointer; color: #d29922;
+                 font-size: .72rem; font-family: inherit; padding: 0;
+                 text-decoration: underline; text-underline-offset: 2px; }
+    .warn-link:hover { color: #e3b341; }
+
     table { width: 100%; border-collapse: collapse; font-size: .78rem; }
     thead th { text-align: left; padding: 8px 10px; color: #484f58;
                text-transform: uppercase; font-size: .65rem; letter-spacing: .07em;
@@ -2363,13 +2368,17 @@ def _render_inspect_page() -> str:
                 style="color:#79c0ff;text-decoration:none"
                 title="${esc(s.source)}">${esc(s.source.replace(/^https?:\\/\\//, "").slice(0, 60))}</a>`
           : `<span title="${esc(s.source)}">${esc(s.source)}</span>`;
-        return `<tr onclick="showSource(${JSON.stringify(s.source)})">
+        const srcJson = JSON.stringify(s.source);
+        const warnBtn = s.chunks <= 2
+          ? `<button class="warn-link" onclick='event.stopPropagation();showSource(${srcJson})'>⚠ check content</button>`
+          : "";
+        return `<tr onclick='showSource(${srcJson})'>
           <td class="src">${label}${warn}</td>
           <td class="num">${s.chunks}</td>
           <td class="meta">${esc(s.vendor || "—")}</td>
           <td class="meta">${esc(s.product || "—")}</td>
           <td class="meta">${esc(s.doc_type || "—")}</td>
-          <td class="warn">${s.chunks <= 2 ? "⚠ check content" : ""}</td>
+          <td class="warn">${warnBtn}</td>
         </tr>`;
       }).join("");
 
