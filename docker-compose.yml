@@ -11,7 +11,9 @@ services:
     restart: unless-stopped
 
   mcp-server:
-    build: ./mcp-server
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile
     image: ${IMAGE_BASE:-local}/mcp-server:${IMAGE_TAG:-latest}
     ports:
       - "8000:8000"
@@ -26,14 +28,18 @@ services:
       - RERANKER_CACHE_DIR=/data/reranker-cache
       - TIER_BOOST_4=${TIER_BOOST_4:-0.75}
       - CLIP_API_KEY=${CLIP_API_KEY:-}
+      - DOCS_DIR=/docs
     volumes:
       - mcp_data:/data
+      - ./docs:/docs
     depends_on:
       - qdrant
     restart: unless-stopped
 
   ingest:
-    build: ./ingest
+    build:
+      context: .
+      dockerfile: ingest/Dockerfile
     image: ${IMAGE_BASE:-local}/ingest:${IMAGE_TAG:-latest}
     volumes:
       - ./docs:/docs
@@ -49,7 +55,9 @@ services:
       - ingest
 
   ingest-watch:
-    build: ./ingest
+    build:
+      context: .
+      dockerfile: ingest/Dockerfile
     image: ${IMAGE_BASE:-local}/ingest:${IMAGE_TAG:-latest}
     command: ["--watch"]
     volumes:

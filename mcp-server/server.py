@@ -1,15 +1,18 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 
-import tiktoken
+import fitz  # PyMuPDF
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from openai import AsyncOpenAI
@@ -18,15 +21,28 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     FieldCondition,
     Filter,
+    FilterSelector,
     Fusion,
     FusionQuery,
     MatchAny,
     MatchValue,
     PointStruct,
     Prefetch,
-    SparseVector,
 )
 from starlette.responses import HTMLResponse, JSONResponse, Response
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from lib.ingest_core import (  # noqa: E402
+    EMBED_BATCH,
+    PAYLOAD_KEYS,
+    UPSERT_BATCH,
+    chunk_document,
+    chunk_document_sections,
+    chunk_markdown,
+    compute_sparse,
+    enc,
+    load_sidecar,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -43,12 +59,13 @@ RERANKER = os.environ.get("RERANKER", "").lower()  # "local", "cohere", or ""
 RERANKER_CACHE_DIR = os.environ.get("RERANKER_CACHE_DIR", "/data/reranker-cache")
 TIER_BOOST_4 = float(os.environ.get("TIER_BOOST_4", "0.75"))
 CLIP_API_KEY = os.environ.get("CLIP_API_KEY", "")
+DOCS_DIR = Path(os.environ.get("DOCS_DIR", "/docs"))
+EMBEDDING_DIM = 1536
 STATS_TTL = 60
 GAP_THRESHOLD = 0.02  # RRF scores are much smaller than cosine scores
 SEARCH_TIMEOUT = 25
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-enc = tiktoken.get_encoding("cl100k_base")
 
 _TIER_LABELS: dict[int, str] = {
     1: "VENDOR-DOC",
@@ -100,13 +117,6 @@ def apply_tier_boost(hits: list) -> list:
         return hit.score
 
     return sorted(hits, key=boosted, reverse=True)
-
-
-def compute_sparse(text: str) -> SparseVector:
-    counts: dict[int, float] = {}
-    for tid in enc.encode(text):
-        counts[tid] = counts.get(tid, 0.0) + 1.0
-    return SparseVector(indices=list(counts), values=list(counts.values()))
 
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────
@@ -171,7 +181,7 @@ def build_filter(
 
 
 qdrant = connect_qdrant()
-mcp = FastMCP("network-docs", host="0.0.0.0", port=8000)
+mcp = FastMCP("distill", host="0.0.0.0", port=8000)
 
 # ── Re-ranker ─────────────────────────────────────────────────────────────────
 
@@ -920,6 +930,681 @@ async def clip_handler(request):
 
     log.info("clip done url=%r  chunks=%d", url, len(chunks))
     return JSONResponse({"chunks": len(chunks), "source": url}, headers=cors)
+
+
+# ── File browser ─────────────────────────────────────────────────────────────
+
+_ingest_jobs: dict[str, dict] = {}  # job_id -> {status, file, chunks, error}
+_ingest_jobs_lock = threading.Lock()
+_SUPPORTED_SUFFIXES = {".pdf", ".md"}
+
+
+def _file_source_id(path: Path) -> str:
+    try:
+        return str(path.relative_to(DOCS_DIR))
+    except ValueError:
+        return path.name
+
+
+def _safe_path(raw: str) -> Path | None:
+    """Resolve a relative path under DOCS_DIR; return None if it escapes the root."""
+    try:
+        resolved = (DOCS_DIR / raw).resolve()
+        resolved.relative_to(DOCS_DIR.resolve())
+        return resolved
+    except (ValueError, Exception):
+        return None
+
+
+async def _embed_chunks_async(chunks: list[dict]) -> list[dict]:
+    texts = [c["text"] for c in chunks]
+    all_embeddings: list = []
+    for i in range(0, len(texts), EMBED_BATCH):
+        resp = await openai_client.embeddings.create(
+            model=EMBEDDING_MODEL, input=texts[i : i + EMBED_BATCH]
+        )
+        all_embeddings.extend(r.embedding for r in resp.data)
+    for chunk, vec in zip(chunks, all_embeddings):
+        chunk["vector"] = vec
+    return chunks
+
+
+async def _ingest_file_bg(path: Path, job_id: str) -> None:
+    """Ingest a single PDF or Markdown file; always force-replaces existing chunks."""
+    with _ingest_jobs_lock:
+        _ingest_jobs[job_id] = {"status": "running", "file": path.name, "chunks": 0, "error": ""}
+    try:
+        source = _file_source_id(path)
+        meta = load_sidecar(path)
+
+        # Purge existing chunks for this source before re-indexing
+        qdrant.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=FilterSelector(
+                filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=source))])
+            ),
+            wait=True,
+        )
+
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            doc = fitz.open(str(path))
+            pages = [(i + 1, page.get_text()) for i, page in enumerate(doc)]
+            non_empty = [(n, t) for n, t in pages if t.strip()]
+            if not non_empty:
+                raise ValueError("No extractable text found in PDF")
+            all_chunks = chunk_document_sections(doc, source, meta)
+            if not all_chunks:
+                all_chunks = chunk_document(non_empty, source, meta)
+        elif suffix == ".md":
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not text.strip():
+                raise ValueError("File is empty")
+            all_chunks = chunk_markdown(text, source, meta)
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+
+        all_chunks = await _embed_chunks_async(all_chunks)
+        for chunk in all_chunks:
+            chunk["sparse"] = compute_sparse(chunk["text"])
+
+        payload_keys = PAYLOAD_KEYS | set(meta.keys())
+        points = [
+            PointStruct(
+                id=c["id"],
+                vector={"dense": c["vector"], "bm25": c["sparse"]},
+                payload={k: c[k] for k in payload_keys if k in c},
+            )
+            for c in all_chunks
+        ]
+        for i in range(0, len(points), UPSERT_BATCH):
+            qdrant.upsert(collection_name=COLLECTION_NAME, points=points[i : i + UPSERT_BATCH])
+
+        _qdrant_cache["at"] = 0.0
+        with _ingest_jobs_lock:
+            _ingest_jobs[job_id] = {
+                "status": "done",
+                "file": path.name,
+                "chunks": len(points),
+                "error": "",
+            }
+        log.info("file ingest done path=%r chunks=%d", str(path), len(points))
+
+    except Exception as exc:
+        log.error("file ingest error path=%r: %s", str(path), exc)
+        with _ingest_jobs_lock:
+            _ingest_jobs[job_id] = {
+                "status": "error",
+                "file": path.name,
+                "chunks": 0,
+                "error": str(exc),
+            }
+
+
+def _list_docs_files() -> list[dict]:
+    if not DOCS_DIR.exists():
+        return []
+    stats = collect_qdrant_stats()
+    sources = stats.get("sources", {})
+    files = []
+    for path in sorted(DOCS_DIR.glob("**/*")):
+        if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
+            continue
+        rel = _file_source_id(path)
+        st = path.stat()
+        sidecar = load_sidecar(path)
+        files.append(
+            {
+                "name": path.name,
+                "path": rel,
+                "size": st.st_size,
+                "modified": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(),
+                "type": path.suffix.lower().lstrip("."),
+                "chunks": sources.get(rel, {}).get("chunks", 0),
+                "has_sidecar": path.with_suffix(".json").exists(),
+                "meta": sidecar,
+            }
+        )
+    return files
+
+
+@mcp.custom_route("/files", methods=["GET"])
+async def files_page_handler(request):
+    return HTMLResponse(_render_files_page())
+
+
+@mcp.custom_route("/files/list", methods=["GET"])
+async def files_list_handler(request):
+    return JSONResponse(_list_docs_files())
+
+
+@mcp.custom_route("/files/upload", methods=["POST"])
+async def files_upload_handler(request):
+    try:
+        form = await request.form()
+    except Exception:
+        return JSONResponse({"error": "Expected multipart/form-data"}, status_code=400)
+
+    file = form.get("file")
+    if file is None:
+        return JSONResponse({"error": "No file provided"}, status_code=400)
+
+    filename = Path(file.filename).name  # strip any path components
+    if Path(filename).suffix.lower() not in _SUPPORTED_SUFFIXES:
+        return JSONResponse({"error": "Only .pdf and .md files are supported"}, status_code=400)
+
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = DOCS_DIR / filename
+    content = await file.read()
+    dest.write_bytes(content)
+    log.info("file uploaded path=%r size=%d", str(dest), len(content))
+
+    job_id = str(uuid.uuid4())
+    asyncio.create_task(_ingest_file_bg(dest, job_id))
+    return JSONResponse({"job_id": job_id, "file": filename})
+
+
+@mcp.custom_route("/files/status", methods=["GET"])
+async def files_status_handler(request):
+    job_id = request.query_params.get("job_id", "")
+    with _ingest_jobs_lock:
+        job = _ingest_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"error": "Unknown job"}, status_code=404)
+    return JSONResponse(job)
+
+
+@mcp.custom_route("/files/delete", methods=["DELETE", "POST"])
+async def files_delete_handler(request):
+    rel = request.query_params.get("path", "")
+    if not rel:
+        return JSONResponse({"error": "'path' query param required"}, status_code=400)
+
+    target = _safe_path(rel)
+    if target is None or not target.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    source = _file_source_id(target)
+
+    # Purge chunks from Qdrant
+    try:
+        qdrant.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=FilterSelector(
+                filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=source))])
+            ),
+            wait=True,
+        )
+    except Exception as exc:
+        log.warning("qdrant delete error for %r: %s", source, exc)
+
+    # Remove file and sidecar
+    target.unlink(missing_ok=True)
+    sidecar = target.with_suffix(".json")
+    sidecar.unlink(missing_ok=True)
+
+    _qdrant_cache["at"] = 0.0
+    log.info("file deleted path=%r", str(target))
+    return JSONResponse({"deleted": rel})
+
+
+@mcp.custom_route("/files/download", methods=["GET"])
+async def files_download_handler(request):
+    rel = request.query_params.get("path", "")
+    if not rel:
+        return JSONResponse({"error": "'path' query param required"}, status_code=400)
+
+    target = _safe_path(rel)
+    if target is None or not target.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    content = target.read_bytes()
+    media = "application/pdf" if target.suffix.lower() == ".pdf" else "text/markdown"
+    return Response(
+        content=content,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
+    )
+
+
+@mcp.custom_route("/files/sidecar", methods=["GET", "PUT"])
+async def files_sidecar_handler(request):
+    rel = request.query_params.get("path", "")
+    if not rel:
+        return JSONResponse({"error": "'path' query param required"}, status_code=400)
+
+    target = _safe_path(rel)
+    if target is None:
+        return JSONResponse({"error": "Invalid path"}, status_code=400)
+
+    if request.method == "GET":
+        sidecar = target.with_suffix(".json")
+        if sidecar.exists():
+            return JSONResponse(json.loads(sidecar.read_text()))
+        return JSONResponse({})
+
+    # PUT — save sidecar and optionally re-ingest
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Body must be a JSON object"}, status_code=400)
+
+    # Strip empty values
+    cleaned = {k: v for k, v in body.items() if v not in (None, "")}
+
+    sidecar = target.with_suffix(".json")
+    sidecar.write_text(json.dumps(cleaned, indent=2))
+    log.info("sidecar saved path=%r", str(sidecar))
+
+    reingest = request.query_params.get("reingest", "").lower() in ("1", "true", "yes")
+    if reingest and target.exists():
+        job_id = str(uuid.uuid4())
+        asyncio.create_task(_ingest_file_bg(target, job_id))
+        return JSONResponse({"saved": True, "job_id": job_id})
+
+    return JSONResponse({"saved": True})
+
+
+def _render_files_page() -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Distill — Files</title>
+  <meta http-equiv="refresh" content="0; url=/files#">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+           background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+
+    header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+             border-bottom: 1px solid #21262d; }
+    header h1 { font-size: .9rem; color: #58a6ff; letter-spacing: .04em; flex: 1; }
+    header nav a { font-size: .75rem; color: #484f58; text-decoration: none;
+                   padding: 4px 10px; border: 1px solid #30363d; border-radius: 6px; }
+    header nav a:hover { color: #c9d1d9; border-color: #58a6ff; }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+    /* Upload zone */
+    #drop-zone { border: 2px dashed #30363d; border-radius: 8px; padding: 32px;
+                 text-align: center; color: #484f58; cursor: pointer;
+                 transition: border-color .15s, color .15s; margin-bottom: 24px; }
+    #drop-zone.dragover { border-color: #58a6ff; color: #79c0ff; }
+    #drop-zone:hover { border-color: #484f58; color: #8b949e; }
+    #drop-zone p { font-size: .8rem; margin-top: 6px; }
+    #file-input { display: none; }
+
+    /* Upload progress bar */
+    #upload-status { display: none; margin-bottom: 16px; padding: 10px 14px;
+                     border-radius: 6px; font-size: .78rem; line-height: 1.5; }
+    #upload-status.running { display: block; color: #79c0ff; background: #0d1f33;
+                              border: 1px solid #79c0ff40; }
+    #upload-status.done    { display: block; color: #3fb950; background: #0d2818;
+                              border: 1px solid #2ea04340; }
+    #upload-status.error   { display: block; color: #f85149; background: #2d0f0f;
+                              border: 1px solid #f8514940; }
+
+    /* File table */
+    table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    thead th { text-align: left; padding: 8px 10px; color: #484f58;
+               text-transform: uppercase; font-size: .65rem; letter-spacing: .07em;
+               border-bottom: 1px solid #21262d; }
+    tbody tr { border-bottom: 1px solid #161b22; }
+    tbody tr:hover { background: #161b22; }
+    td { padding: 8px 10px; vertical-align: middle; }
+    td.name { color: #79c0ff; max-width: 280px; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+    td.size, td.modified, td.chunks { color: #8b949e; }
+    td.meta { color: #8b949e; font-size: .72rem; max-width: 180px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { display: inline-block; font-size: .65rem; padding: 1px 6px;
+             border-radius: 10px; margin-right: 4px; }
+    .badge-pdf { background: #1f2d45; color: #58a6ff; }
+    .badge-md  { background: #1a2a1a; color: #3fb950; }
+    td.actions { white-space: nowrap; }
+    td.actions button { background: none; border: none; cursor: pointer;
+                        padding: 3px 7px; border-radius: 4px; font-size: .75rem;
+                        color: #484f58; transition: color .15s, background .15s; }
+    td.actions button:hover { color: #c9d1d9; background: #21262d; }
+    td.actions button.del:hover { color: #f85149; }
+    .empty { color: #484f58; font-size: .82rem; padding: 32px 0; text-align: center; }
+
+    /* Modal */
+    #modal-overlay { display: none; position: fixed; inset: 0;
+                     background: rgba(0,0,0,.7); z-index: 100;
+                     align-items: center; justify-content: center; }
+    #modal-overlay.open { display: flex; }
+    #modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+             padding: 24px; width: 480px; max-width: 95vw; }
+    #modal h2 { font-size: .85rem; color: #c9d1d9; margin-bottom: 18px;
+                padding-bottom: 10px; border-bottom: 1px solid #21262d; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: .65rem; color: #8b949e;
+                   text-transform: uppercase; letter-spacing: .07em; margin-bottom: 4px; }
+    .field input, .field select { width: 100%; background: #0d1117; border: 1px solid #30363d;
+                                   border-radius: 4px; color: #c9d1d9;
+                                   font-family: inherit; font-size: .78rem;
+                                   padding: 5px 8px; outline: none; }
+    .field input:focus, .field select:focus { border-color: #58a6ff; }
+    .field select option { background: #0d1117; }
+    .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .reingest-row { display: flex; align-items: center; gap: 8px; margin: 14px 0 18px;
+                    font-size: .75rem; color: #8b949e; }
+    .reingest-row input[type="checkbox"] { width: auto; accent-color: #58a6ff; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .modal-actions button { padding: 6px 16px; border-radius: 6px; font-family: inherit;
+                             font-size: .78rem; font-weight: 600; cursor: pointer;
+                             border: 1px solid #30363d; }
+    #modal-cancel { background: none; color: #8b949e; }
+    #modal-cancel:hover { color: #c9d1d9; }
+    #modal-save { background: #238636; border-color: #2ea043; color: #fff; }
+    #modal-save:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>&#9673; Distill — Files</h1>
+    <nav>
+      <a href="/stats">Stats</a>
+    </nav>
+  </header>
+
+  <main>
+    <div id="drop-zone">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="1.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <p>Drop PDF or Markdown files here, or click to browse</p>
+      <input type="file" id="file-input" accept=".pdf,.md" multiple>
+    </div>
+
+    <div id="upload-status"></div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Size</th>
+          <th>Modified</th>
+          <th>Chunks</th>
+          <th>Metadata</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="file-tbody">
+        <tr><td colspan="6" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <!-- Sidecar edit modal -->
+  <div id="modal-overlay">
+    <div id="modal">
+      <h2 id="modal-title">Edit Metadata</h2>
+      <div class="modal-grid">
+        <div class="field">
+          <label>Vendor</label>
+          <input id="m-vendor" type="text" placeholder="cisco, aruba…">
+        </div>
+        <div class="field">
+          <label>Product</label>
+          <input id="m-product" type="text" placeholder="ios-xe, aos-cx…">
+        </div>
+        <div class="field">
+          <label>Version</label>
+          <input id="m-version" type="text" placeholder="17.9.1">
+        </div>
+        <div class="field">
+          <label>Doc Type</label>
+          <select id="m-doc-type">
+            <option value="">— none —</option>
+            <option value="cli-reference">cli-reference</option>
+            <option value="config-guide">config-guide</option>
+            <option value="design-guide">design-guide</option>
+            <option value="validated-design">validated-design</option>
+            <option value="release-notes">release-notes</option>
+            <option value="white-paper">white-paper</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Trust Tier</label>
+          <select id="m-tier">
+            <option value="1">1 — Vendor documentation</option>
+            <option value="2">2 — Validated design</option>
+            <option value="3">3 — Internal</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Source Type</label>
+          <select id="m-source-type">
+            <option value="vendor-doc">vendor-doc</option>
+            <option value="validated-design">validated-design</option>
+            <option value="internal">internal</option>
+          </select>
+        </div>
+      </div>
+      <div class="reingest-row">
+        <input type="checkbox" id="m-reingest" checked>
+        <label for="m-reingest">Re-ingest file after saving</label>
+      </div>
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let _currentSidecarPath = null;
+    let _pollTimer = null;
+
+    function fmtSize(b) {
+      if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+      if (b >= 1024) return (b / 1024).toFixed(0) + " KB";
+      return b + " B";
+    }
+
+    function fmtDate(iso) {
+      return iso.slice(0, 10);
+    }
+
+    function fmtMeta(meta) {
+      if (!meta || !Object.keys(meta).length) return "—";
+      const parts = [];
+      if (meta.vendor) parts.push(meta.vendor);
+      if (meta.product) parts.push(meta.product);
+      if (meta.version) parts.push(meta.version);
+      if (meta.doc_type) parts.push(meta.doc_type);
+      return parts.join(" · ") || "—";
+    }
+
+    async function loadFiles() {
+      const resp = await fetch("/files/list");
+      const files = await resp.json();
+      const tbody = document.getElementById("file-tbody");
+      if (!files.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No documents yet — upload a PDF or Markdown file to get started.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = files.map(f => {
+        const badge = `<span class="badge badge-${f.type}">.${f.type}</span>`;
+        const metaStr = fmtMeta(f.meta);
+        const metaTitle = JSON.stringify(f.meta, null, 2);
+        return `<tr>
+          <td class="name">${badge}${escHtml(f.name)}</td>
+          <td class="size">${fmtSize(f.size)}</td>
+          <td class="modified">${fmtDate(f.modified)}</td>
+          <td class="chunks">${f.chunks.toLocaleString()}</td>
+          <td class="meta" title="${escHtml(metaTitle)}">${escHtml(metaStr)}</td>
+          <td class="actions">
+            <button onclick="downloadFile('${escAttr(f.path)}')" title="Download">&#8595;</button>
+            <button onclick="openSidecar('${escAttr(f.path)}')" title="Edit metadata">&#9998;</button>
+            <button class="del" onclick="deleteFile('${escAttr(f.path)}', '${escAttr(f.name)}')" title="Delete">&#10005;</button>
+          </td>
+        </tr>`;
+      }).join("");
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+    function escAttr(s) {
+      return String(s).replace(/\\\\/g,"\\\\\\\\").replace(/'/g,"\\\\'");
+    }
+
+    // ── Upload ──
+
+    const dropZone = document.getElementById("drop-zone");
+    const fileInput = document.getElementById("file-input");
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", e => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      uploadFiles(e.dataTransfer.files);
+    });
+    fileInput.addEventListener("change", () => { uploadFiles(fileInput.files); fileInput.value = ""; });
+
+    async function uploadFiles(fileList) {
+      for (const file of fileList) {
+        await uploadOne(file);
+      }
+    }
+
+    async function uploadOne(file) {
+      const statusEl = document.getElementById("upload-status");
+      statusEl.className = "running";
+      statusEl.textContent = `Uploading ${file.name}…`;
+
+      const form = new FormData();
+      form.append("file", file);
+
+      let jobId;
+      try {
+        const resp = await fetch("/files/upload", { method: "POST", body: form });
+        const data = await resp.json();
+        if (!resp.ok) { showUploadError(data.error || "Upload failed"); return; }
+        jobId = data.job_id;
+      } catch (e) { showUploadError(e.message); return; }
+
+      statusEl.textContent = `Indexing ${file.name}…`;
+      _pollTimer = setInterval(async () => {
+        try {
+          const r = await fetch("/files/status?job_id=" + encodeURIComponent(jobId));
+          const job = await r.json();
+          if (job.status === "done") {
+            clearInterval(_pollTimer);
+            statusEl.className = "done";
+            statusEl.textContent = `${file.name} — ${job.chunks.toLocaleString()} chunks indexed.`;
+            loadFiles();
+          } else if (job.status === "error") {
+            clearInterval(_pollTimer);
+            showUploadError(`Ingest failed: ${job.error}`);
+          }
+        } catch (_) {}
+      }, 1500);
+    }
+
+    function showUploadError(msg) {
+      const el = document.getElementById("upload-status");
+      el.className = "error";
+      el.textContent = msg;
+    }
+
+    // ── Delete ──
+
+    async function deleteFile(path, name) {
+      if (!confirm(`Delete ${name} and remove all its indexed chunks?`)) return;
+      const resp = await fetch("/files/delete?path=" + encodeURIComponent(path), { method: "DELETE" });
+      if (resp.ok) { loadFiles(); }
+      else { const d = await resp.json(); alert(d.error || "Delete failed"); }
+    }
+
+    // ── Download ──
+
+    function downloadFile(path) {
+      window.location = "/files/download?path=" + encodeURIComponent(path);
+    }
+
+    // ── Sidecar modal ──
+
+    async function openSidecar(path) {
+      _currentSidecarPath = path;
+      document.getElementById("modal-title").textContent =
+        "Edit Metadata — " + path.split("/").pop();
+      const resp = await fetch("/files/sidecar?path=" + encodeURIComponent(path));
+      const meta = await resp.json();
+      document.getElementById("m-vendor").value = meta.vendor || "";
+      document.getElementById("m-product").value = meta.product || "";
+      document.getElementById("m-version").value = meta.version || "";
+      document.getElementById("m-doc-type").value = meta.doc_type || "";
+      document.getElementById("m-tier").value = String(meta.trust_tier || "1");
+      document.getElementById("m-source-type").value = meta.source_type || "vendor-doc";
+      document.getElementById("modal-overlay").classList.add("open");
+    }
+
+    document.getElementById("modal-cancel").addEventListener("click", () => {
+      document.getElementById("modal-overlay").classList.remove("open");
+    });
+    document.getElementById("modal-overlay").addEventListener("click", e => {
+      if (e.target === document.getElementById("modal-overlay"))
+        document.getElementById("modal-overlay").classList.remove("open");
+    });
+
+    document.getElementById("modal-save").addEventListener("click", async () => {
+      const reingest = document.getElementById("m-reingest").checked;
+      const body = {
+        vendor:      document.getElementById("m-vendor").value.trim().toLowerCase(),
+        product:     document.getElementById("m-product").value.trim().toLowerCase(),
+        version:     document.getElementById("m-version").value.trim(),
+        doc_type:    document.getElementById("m-doc-type").value,
+        trust_tier:  parseInt(document.getElementById("m-tier").value),
+        source_type: document.getElementById("m-source-type").value,
+      };
+      const url = "/files/sidecar?path=" + encodeURIComponent(_currentSidecarPath)
+                + (reingest ? "&reingest=1" : "");
+      const resp = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      document.getElementById("modal-overlay").classList.remove("open");
+      if (reingest && data.job_id) {
+        const statusEl = document.getElementById("upload-status");
+        const fname = _currentSidecarPath.split("/").pop();
+        statusEl.className = "running";
+        statusEl.textContent = "Re-indexing " + fname + "…";
+        const jobId = data.job_id;
+        _pollTimer = setInterval(async () => {
+          const r = await fetch("/files/status?job_id=" + encodeURIComponent(jobId));
+          const job = await r.json();
+          if (job.status === "done") {
+            clearInterval(_pollTimer);
+            statusEl.className = "done";
+            statusEl.textContent = fname + " — " + job.chunks.toLocaleString() + " chunks re-indexed.";
+            loadFiles();
+          } else if (job.status === "error") {
+            clearInterval(_pollTimer);
+            showUploadError("Re-ingest failed: " + job.error);
+          }
+        }, 1500);
+      } else {
+        loadFiles();
+      }
+    });
+
+    loadFiles();
+  </script>
+</body>
+</html>"""
 
 
 # ── Stats page ────────────────────────────────────────────────────────────────
