@@ -5,78 +5,112 @@ CADDYFILE=/etc/caddy/Caddyfile
 DOMAIN="${TLS_DOMAIN:-distill.local}"
 MODE="${TLS_MODE:-internal}"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-
+die()     { echo "ERROR: $*" >&2; exit 1; }
 require() {
     eval "val=\$$1"
     [ -n "$val" ] || die "$1 must be set for TLS_MODE=$MODE / TLS_DNS_PROVIDER=${TLS_DNS_PROVIDER}"
 }
 
-write_internal() {
-    require TLS_DOMAIN
-    cat > "$CADDYFILE" <<EOF
-$DOMAIN {
-    tls internal
+# write_caddyfile <tls_block>
+# Writes a complete Caddyfile.  All write_* functions delegate here so that
+# security directives are always present regardless of TLS mode chosen.
+write_caddyfile() {
+    local tls_block="$1"
+    local rate="${CLIP_RATE_LIMIT:-20}"
+
+    # Validate auth vars — must both be set or both be unset
+    if [ -n "$ADMIN_USER" ] && [ -z "$ADMIN_PASSWORD_HASH" ]; then
+        die "ADMIN_PASSWORD_HASH must be set when ADMIN_USER is set"
+    fi
+    if [ -z "$ADMIN_USER" ] && [ -n "$ADMIN_PASSWORD_HASH" ]; then
+        die "ADMIN_USER must be set when ADMIN_PASSWORD_HASH is set"
+    fi
+
+    {
+        printf '%s {\n' "$DOMAIN"
+        printf '%s\n' "$tls_block"
+
+        # Security response headers
+        cat <<CADDY
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+CADDY
+
+        # Optional basic auth on /stats and /files
+        if [ -n "$ADMIN_USER" ]; then
+            cat <<CADDY
+
+    @admin path /stats* /files*
+    basicauth @admin {
+        $ADMIN_USER $ADMIN_PASSWORD_HASH
+    }
+CADDY
+        fi
+
+        # Rate limit /clip to protect OpenAI API credits
+        cat <<CADDY
+
+    @clip path /clip*
+    rate_limit @clip {
+        zone clip {
+            key    {remote_host}
+            events $rate
+            window 1m
+        }
+    }
+
     reverse_proxy mcp-server:8000
 }
-EOF
+CADDY
+    } > "$CADDYFILE"
+}
+
+write_internal() {
+    require TLS_DOMAIN
+    write_caddyfile "    tls internal"
 }
 
 write_dns_cloudflare() {
     require TLS_DOMAIN
     require CF_API_TOKEN
-    cat > "$CADDYFILE" <<EOF
-$DOMAIN {
-    tls {
+    write_caddyfile "    tls {
         dns cloudflare {env.CF_API_TOKEN}
-    }
-    reverse_proxy mcp-server:8000
-}
-EOF
+    }"
 }
 
 write_dns_route53() {
     require TLS_DOMAIN
     # Route53 uses the AWS SDK credential chain:
     # AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, or an IAM instance role.
-    cat > "$CADDYFILE" <<EOF
-$DOMAIN {
-    tls {
+    write_caddyfile "    tls {
         dns route53 {
             max_retries 10
             region {env.AWS_REGION}
         }
-    }
-    reverse_proxy mcp-server:8000
-}
-EOF
+    }"
 }
 
 write_dns_acmedns() {
     require TLS_DOMAIN
     require ACMEDNS_HOST
     # ACME-DNS: self-hosted acme-dns server. See https://github.com/joohoi/acme-dns
-    cat > "$CADDYFILE" <<EOF
-$DOMAIN {
-    tls {
+    write_caddyfile "    tls {
         dns acmedns {env.ACMEDNS_HOST}
-    }
-    reverse_proxy mcp-server:8000
-}
-EOF
+    }"
 }
 
 write_dns_digitalocean() {
     require TLS_DOMAIN
     require DO_AUTH_TOKEN
-    cat > "$CADDYFILE" <<EOF
-$DOMAIN {
-    tls {
+    write_caddyfile "    tls {
         dns digitalocean {env.DO_AUTH_TOKEN}
-    }
-    reverse_proxy mcp-server:8000
-}
-EOF
+    }"
 }
 
 case "$MODE" in

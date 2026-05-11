@@ -44,6 +44,14 @@ COHERE_API_KEY=your-key
 |---|---|---|
 | `CLIP_API_KEY` | — | Secret key for the `/clip` endpoint. Required to use the browser extension. Generate with `openssl rand -hex 32`. |
 
+### Proxy security (optional, requires `COMPOSE_PROFILES=tls`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_USER` | — | Username for HTTP basic auth on `/stats` and `/files`. Must be set together with `ADMIN_PASSWORD_HASH`. |
+| `ADMIN_PASSWORD_HASH` | — | bcrypt hash of the admin password. Generate with: `docker run --rm caddy:2-alpine caddy hash-password --plaintext yourpassword` |
+| `CLIP_RATE_LIMIT` | `20` | Maximum `/clip` requests per IP per minute. Protects OpenAI API credits from bulk abuse. |
+
 ### TLS / Caddy proxy
 
 Only read when `COMPOSE_PROFILES=tls`. See [TLS setup](#tls-setup) below.
@@ -268,6 +276,59 @@ Replace the IP/port with your TLS domain and remove `--allow-http`.
 ```
 
 > **Internal CA note:** if using `TLS_MODE=internal`, the client OS must trust Caddy's root certificate (step 4 of Option A above) before these configs will work.
+
+---
+
+## Proxy security hardening
+
+These features are active whenever Caddy is running (`COMPOSE_PROFILES=tls`). No extra configuration is needed for security headers and rate limiting — they are always on. Admin auth is opt-in.
+
+### Security response headers
+
+Injected by Caddy on every response:
+
+| Header | Value | Purpose |
+|---|---|---|
+| `Strict-Transport-Security` | `max-age=31536000` | Tells browsers to use HTTPS only for this domain for one year |
+| `X-Content-Type-Options` | `nosniff` | Prevents MIME-type sniffing |
+| `X-Frame-Options` | `DENY` | Blocks the UI from being embedded in an iframe |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limits referrer leakage on cross-origin navigation |
+| `Server` | _(removed)_ | Prevents Caddy from advertising itself |
+
+### Admin authentication
+
+Protects `/stats` and `/files` with HTTP basic auth. Off by default — set both env vars to enable.
+
+**1. Generate a password hash:**
+
+```bash
+docker run --rm caddy:2-alpine caddy hash-password --plaintext yourpassword
+```
+
+Copy the output (a `$2a$...` bcrypt string).
+
+**2. Add to `.env`:**
+
+```bash
+ADMIN_USER=admin
+ADMIN_PASSWORD_HASH=JDJhJDE0JG...
+```
+
+**3. Restart Caddy:**
+
+```bash
+docker compose up -d caddy
+```
+
+> Both variables must be set together or both left unset. Setting only one causes Caddy to refuse to start.
+
+### Rate limiting on `/clip`
+
+The `/clip` endpoint fetches URLs and generates embeddings — bulk requests can exhaust OpenAI API credits. Caddy limits each client IP to `CLIP_RATE_LIMIT` requests per minute (default: 20). Excess requests receive HTTP 429.
+
+```bash
+CLIP_RATE_LIMIT=20   # default; lower to tighten
+```
 
 ---
 
