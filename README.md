@@ -1,19 +1,29 @@
-# Network Docs RAG
+# Distill
 
-Give Claude a private library of your vendor documentation — so when you ask it how to configure OSPF on AOS-CX or what the correct BGP community syntax is for IOS-XE 17.9, it answers from *your actual manuals*, not from general training data.
+**Turn your technical documentation into a knowledge base your AI can actually search.**
+
+[![CI](https://github.com/afly007/distill/actions/workflows/ci.yml/badge.svg)](https://github.com/afly007/distill/actions/workflows/ci.yml)
+![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-blueviolet)
 
 ---
 
-## Why does this matter?
+## The problem
 
-Claude is a capable assistant, but it has two limitations when it comes to vendor networking documentation:
+AI assistants are remarkably capable — until you ask about your specific environment. The firmware version you're running. The vendor feature that shipped six months after the training cutoff. The internal design doc your team wrote last quarter. The obscure CLI flag that's documented in a 900-page PDF nobody reads.
 
-1. **It may be out of date.** Training has a knowledge cutoff, so it may not know the exact syntax for the firmware version you're running.
-2. **It can guess.** When Claude doesn't know something precisely, it sometimes produces a confident-sounding but wrong answer — a real problem when you're configuring production equipment.
+When an AI doesn't know something, it doesn't say "I don't know." It sounds confident anyway. That's the gap.
 
-This project fixes both. You give it your PDFs (and Markdown notes, and curated web links), and from that point on Claude searches them before answering. Every response is grounded in a specific chunk of a specific document, with a source reference you can open yourself.
+## What RAG does (and what Distill is)
 
-Think of it like giving a knowledgeable colleague a stack of manuals and saying: *"only answer from what's in here."*
+RAG — Retrieval-Augmented Generation — is a technique where, instead of relying solely on what the AI learned during training, you give it a way to *look things up* at the moment you ask a question.
+
+Think of it like distillation. You have raw source material: hundreds of PDFs, vendor guides, RFCs, internal wikis, community articles. Most of it is dense, repetitive, and hard to search. Distill processes that raw material — breaking it down, extracting the essence, and concentrating it into a form that can be retrieved precisely when needed.
+
+When you ask your AI a question, Distill finds the relevant passages and hands them to the AI along with your question. The AI reasons over *your* documentation, not its training data. The answer is grounded. Citable. Current.
+
+## Why an MCP server
+
+MCP (Model Context Protocol) is the standard interface for connecting AI assistants to external tools and data sources. Distill runs as an MCP server, which means any MCP-compatible AI client — Claude, Cursor, Windsurf, and others — can call `search_docs()` automatically as part of answering your question. You don't copy-paste docs. You don't manage context windows. You just ask.
 
 ---
 
@@ -22,8 +32,7 @@ Think of it like giving a knowledgeable colleague a stack of manuals and saying:
 ```mermaid
 flowchart TB
     subgraph local["💻 Local Machine"]
-        CC["Claude Code CLI"]
-        CD["Claude Desktop\nvia mcp-remote"]
+        AI["MCP Client\nClaude · Cursor · Windsurf · …"]
         BE["Browser Extension\nChrome · Firefox"]
     end
 
@@ -36,15 +45,14 @@ flowchart TB
         DOCS["./docs/\nPDFs · .md files · community.json"]
     end
 
-    CC -->|SSE| MCP
-    CD -->|SSE| MCP
+    AI -->|SSE| MCP
     BE -->|"POST /clip"| MCP
     MCP <-->|"hybrid search + RRF fusion"| QD
     IN -->|"embed + upsert"| QD
     DOCS -->|"make ingest"| IN
 ```
 
-You drop documents into `./docs/` → they are broken into sections and indexed → when you ask Claude a question, it searches the index first, finds the relevant sections, and answers using the actual text from your documents, citing the source and page number every time.
+Drop documents into `./docs/` → they are broken into sections and indexed → when you ask your AI a question, it searches the index first, finds the relevant sections, and answers using actual text from your documents, citing the source every time.
 
 The indexing happens once (or automatically when you drop new files in). Search is instant.
 
@@ -52,22 +60,22 @@ The indexing happens once (or automatically when you drop new files in). Search 
 
 ## What you can search
 
-There are four types of sources, treated with different levels of trust:
+Four source types, treated with different levels of trust:
 
 | Type | Examples | Trust level |
 |---|---|---|
-| **Vendor documentation** | Cisco CLI reference, Juniper config guide, Arista EOS docs | Authoritative — use for CLI syntax and configuration |
-| **Validated designs** | HPE Aruba Validated Solution Guides, Cisco CVDs, reference architectures | High — vendor-recommended designs and best practices |
-| **Internal notes** | Your team's Markdown runbooks, design notes, internal guides | Trusted — your own organisation's knowledge |
+| **Vendor documentation** | CLI references, config guides, release notes | Authoritative — use for exact syntax and configuration |
+| **Validated designs** | CVDs, reference architectures, solution guides | High — vendor-recommended designs and best practices |
+| **Internal notes** | Team runbooks, design decisions, internal guides | Trusted — your organisation's own knowledge |
 | **Community references** | Curated blog posts, forum threads, web articles | Useful context — always verify against vendor docs before implementing |
 
-Community sources are kept deliberately separate. Claude won't mix them into standard search results — you have to explicitly ask for them, and every response comes with a reminder to verify before acting.
+Community sources are kept deliberately separate. Your AI won't mix them into standard search results — you have to explicitly ask for them, and every response comes with a reminder to verify before acting.
 
 ---
 
 ## Quick start
 
-**You need:** Docker, an OpenAI API key, and Claude Code or Claude Desktop.
+**You need:** Docker, an OpenAI API key, and an MCP-compatible AI client.
 
 ```bash
 # 1. Clone and configure
@@ -79,11 +87,15 @@ docker compose up -d
 
 # 3. Drop your PDFs into ./docs/ then ingest
 make ingest
+```
 
-# 4. Connect Claude — add to ~/.claude/settings.json
+**Connect your AI client — add to its MCP config:**
+
+*Claude Code (`~/.claude/settings.json`):*
+```json
 {
   "mcpServers": {
-    "network-docs": {
+    "distill": {
       "type": "sse",
       "url": "http://YOUR_SERVER_IP:8000/sse"
     }
@@ -91,7 +103,19 @@ make ingest
 }
 ```
 
-That's it. Claude can now search your documents.
+*Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):*
+```json
+{
+  "mcpServers": {
+    "distill": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://YOUR_SERVER_IP:8000/sse", "--allow-http"]
+    }
+  }
+}
+```
+
+That's it. Your AI can now search your documents.
 
 ---
 
@@ -115,7 +139,7 @@ Chunks: 4209  (43 embedding batches)
 Done:  4209 chunks stored in 23.1s
 ```
 
-To help Claude filter by vendor, product, or version, add a small metadata file next to each PDF. You can write it manually or generate it automatically:
+To help your AI filter by vendor, product, or version, add a small metadata file next to each PDF. You can write it manually or generate it automatically:
 
 ```bash
 make gen-sidecars   # scans each PDF with GPT-4o-mini and writes a draft .json
@@ -172,7 +196,7 @@ These are stored as community-tier content and only surface when you explicitly 
 
 ### Browser extension (one-click save from any webpage)
 
-The clipper extension lets you save any page you're reading directly to your RAG server — no manifest files, no copy-pasting URLs.
+The clipper extension lets you save any page you're reading directly to your Distill server — no manifest files, no copy-pasting URLs.
 
 **Setup:**
 
@@ -184,9 +208,9 @@ Firefox: go to `about:debugging#/runtime/this-firefox` → **Load Temporary Add-
 
 **Using it:**
 
-Browse to any page you want to save — a blog post, forum thread, or vendor article — click the extension icon, optionally tag it with a vendor and product (the dropdowns are pre-populated from your collection), and click **Save to Network Docs**. The page is fetched server-side, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
+Browse to any page you want to save, click the extension icon, optionally tag it with a vendor and product (the dropdowns are pre-populated from your collection), and click **Save to Distill**. The page is fetched server-side, chunked, embedded, and stored as community-tier content in seconds. A green confirmation shows the chunk count when done.
 
-Reddit links are automatically redirected to `old.reddit.com` for better text extraction — a blue notice in the popup confirms the rewrite happened.
+Reddit links are automatically redirected to `old.reddit.com` for better text extraction — a blue notice in the popup confirms the rewrite.
 
 Saved pages are immediately searchable via `search_community()`. They won't appear in `search_docs()` results (community content is always opt-in).
 
@@ -201,11 +225,11 @@ make watch-stop   # stop it
 
 ---
 
-## Talking to Claude effectively
+## Talking to your AI
 
-Claude uses the search tool when it recognises that your question is about your documentation. A few phrases that reliably trigger it:
+Any MCP-compatible assistant uses the search tool automatically when it recognises that your question is about your documentation. A few phrases that reliably trigger it (shown here with Claude as an example):
 
-- *"Search my network docs for…"*
+- *"Search the docs for…"*
 - *"According to the AOS-CX documentation, how do I…"*
 - *"Using the docs, what's the correct syntax for…"*
 - *"Check the Juniper config guide for…"*
@@ -213,19 +237,19 @@ Claude uses the search tool when it recognises that your question is about your 
 **What works well:**
 - CLI syntax questions — *"What's the command to configure LACP on AOS-CX?"*
 - Configuration examples — *"Show me how to set up OSPF area types on IOS-XE"*
-- Design tradeoffs — *"What does the Aruba validated design recommend for campus core redundancy?"*
+- Design tradeoffs — *"What does the validated design recommend for core redundancy?"*
 - Version-specific questions — *"Is this BGP syntax valid in JunOS 23.2?"*
 
 **What doesn't work:**
-- Asking about topics not in your documents — Claude will say nothing relevant was found rather than guessing
-- Very short or ambiguous queries — give Claude enough to search with
+- Asking about topics not in your documents — the AI will say nothing relevant was found rather than guessing
+- Very short or ambiguous queries — give it enough to search with
 
 ### Sample conversation
 
 ```
-You:    Search my network docs for how to configure BGP route reflectors on IOS-XE
+You:    Search the docs for how to configure BGP route reflectors on IOS-XE
 
-Claude: [calls search_docs("BGP route reflector configuration", vendor="cisco", product="ios-xe")]
+AI:     [calls search_docs("BGP route reflector configuration", vendor="cisco", product="ios-xe")]
 
         [1] cisco-ios-xe-17-cli.pdf  |  page 847  |  §BGP Route Reflector  |  [VENDOR-DOC tier-1]
 
@@ -241,12 +265,12 @@ Claude: [calls search_docs("BGP route reflector configuration", vendor="cisco", 
 
 ### Asking for community references
 
-Community sources are opt-in. Ask for them explicitly and Claude will always flag them as unverified:
+Community sources are opt-in. Ask for them explicitly and the AI will always flag them as unverified:
 
 ```
 You:    Are there any community notes on AOS-CX OSPF tuning?
 
-Claude: [calls search_community("AOS-CX OSPF tuning", product="aos-cx")]
+AI:     [calls search_community("AOS-CX OSPF tuning", product="aos-cx")]
 
         COMMUNITY SOURCES — tier 4. Results from curated community content.
         Verify against vendor documentation before implementing in production.
@@ -260,14 +284,14 @@ Claude: [calls search_community("AOS-CX OSPF tuning", product="aos-cx")]
 
 ## What documents do I have?
 
-Ask Claude directly or check the live dashboard:
+Ask your AI directly or check the live dashboard:
 
 ```
 You:    What documentation do you have access to?
 
-Claude: [calls list_docs()]
+AI:     [calls list_docs()]
 
-        Collection: network_docs  |  Documents: 14  |  Chunks: 52,108
+        Collection: distill  |  Documents: 14  |  Chunks: 52,108
 
         Document                            Vendor  Product  Version  Doc Type          Tier
         ─────────────────────────────────────────────────────────────────────────────────────
@@ -278,7 +302,7 @@ Claude: [calls list_docs()]
         Tier 4 (community) content is excluded — use search_community() to query it.
 ```
 
-Open `http://YOUR_SERVER_IP:8000/stats` for a live dashboard showing ingested documents, recent queries, coverage gaps (topics where your library has nothing relevant), and latency.
+Open `http://YOUR_SERVER_IP:8000/stats` for a live dashboard showing ingested documents, recent queries, coverage gaps, and latency.
 
 ---
 
@@ -291,8 +315,6 @@ make backfill-tiers
 ```
 
 No re-ingestion needed — it updates existing records in place.
-
----
 
 ---
 
@@ -309,8 +331,8 @@ cp .env.example .env
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Required |
-| `COLLECTION_NAME` | `network_docs` | Qdrant collection name — change to namespace multiple doc sets |
-| `IMAGE_BASE` | `ghcr.io/afly007/rag-docs` | GHCR registry prefix — required for `docker compose pull` |
+| `COLLECTION_NAME` | `distill` | Qdrant collection name — change to namespace multiple doc sets |
+| `IMAGE_BASE` | `ghcr.io/afly007/distill` | GHCR registry prefix — required for `docker compose pull` |
 | `RERANKER` | _(off)_ | `local` or `cohere` — improves result precision, see below |
 | `COHERE_API_KEY` | — | Required when `RERANKER=cohere` |
 | `TIER_BOOST_4` | `0.75` | Score penalty for community results (1.0 = disabled) |
@@ -331,7 +353,7 @@ docker compose up -d mcp-server
 
 ---
 
-## Connecting Claude
+## Connecting your AI client
 
 ### Claude Code (CLI)
 
@@ -340,7 +362,7 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "network-docs": {
+    "distill": {
       "type": "sse",
       "url": "http://YOUR_SERVER_IP:8000/sse"
     }
@@ -355,7 +377,7 @@ The desktop app needs a small bridge. Install Node.js first, then add to `~/Libr
 ```json
 {
   "mcpServers": {
-    "network-docs": {
+    "distill": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "http://YOUR_SERVER_IP:8000/sse", "--allow-http"]
     }
@@ -365,13 +387,17 @@ The desktop app needs a small bridge. Install Node.js first, then add to `~/Libr
 
 The `--allow-http` flag is required for non-localhost URLs. Restart the app after saving.
 
+### Other MCP clients (Cursor, Windsurf, etc.)
+
+Any client that supports MCP SSE transports can connect. Point it at `http://YOUR_SERVER_IP:8000/sse`. Refer to your client's MCP configuration documentation for the exact format.
+
 ### SSH tunnel (if port 8000 is not publicly exposed)
 
 ```bash
 ssh -L 8000:localhost:8000 user@your-server
 ```
 
-Then use `http://localhost:8000/sse` in either config above, and omit `--allow-http` for the desktop app.
+Then use `http://localhost:8000/sse` in any config above, and omit `--allow-http` for the desktop app.
 
 ---
 
@@ -413,7 +439,7 @@ docker compose logs -f qdrant
 ### Query the log database directly
 
 ```bash
-docker run --rm -v rag-docs_mcp_data:/data alpine \
+docker run --rm -v distill_mcp_data:/data alpine \
   sh -c "apk add -q sqlite && sqlite3 /data/queries.db \
   'SELECT ts, query, top_score, top_source, top_source_type FROM queries ORDER BY id DESC LIMIT 20'"
 ```
@@ -421,14 +447,14 @@ docker run --rm -v rag-docs_mcp_data:/data alpine \
 ### Delete and re-ingest a collection
 
 ```bash
-curl -X DELETE http://localhost:6333/collections/network_docs
+curl -X DELETE http://localhost:6333/collections/distill
 make ingest-force
 ```
 
 ### Check Qdrant collection info
 
 ```bash
-curl http://localhost:6333/collections/network_docs
+curl http://localhost:6333/collections/distill
 ```
 
 ---
@@ -438,8 +464,8 @@ curl http://localhost:6333/collections/network_docs
 Set `COLLECTION_NAME` to separate doc sets into named collections:
 
 ```bash
-COLLECTION_NAME=cisco   docker compose --profile ingest run --rm ingest
-COLLECTION_NAME=juniper docker compose --profile ingest run --rm ingest
+COLLECTION_NAME=networking   docker compose --profile ingest run --rm ingest
+COLLECTION_NAME=cloud        docker compose --profile ingest run --rm ingest
 ```
 
 The MCP server searches whichever collection it was started with. To switch, update `.env` and restart:
@@ -506,15 +532,15 @@ Documents without sidecars are still ingested and searchable — metadata is jus
 **GHCR images** (public — no login required):
 
 ```
-ghcr.io/afly007/rag-docs/mcp-server:latest
-ghcr.io/afly007/rag-docs/mcp-server:v1.5.0
-ghcr.io/afly007/rag-docs/ingest:latest
+ghcr.io/afly007/distill/mcp-server:latest
+ghcr.io/afly007/distill/mcp-server:v1.5.0
+ghcr.io/afly007/distill/ingest:latest
 ```
 
 Merges to `main` auto-deploy via the self-hosted GitHub Actions runner on the server. Manual fallback:
 
 ```bash
-cd ~/rag-docs
+cd ~/distill
 docker compose pull mcp-server
 docker compose up -d mcp-server
 ```
@@ -550,3 +576,7 @@ ruff is configured in `pyproject.toml` (`line-length=100`, Python 3.12, rules E/
 ## Switching to local embeddings
 
 To eliminate OpenAI API costs, swap `text-embedding-3-small` for a local model (e.g. `nomic-embed-text` via Ollama). The embedding dimension changes from 1536 to 768, so the existing Qdrant collection must be deleted and re-created before re-ingesting. Update `EMBEDDING_MODEL` and `EMBEDDING_DIM` in both `ingest/ingest.py` and `mcp-server/server.py`.
+
+---
+
+*Built with AI assistance using [Claude Code](https://claude.ai/code). Architecture, code, and documentation developed collaboratively.*

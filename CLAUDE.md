@@ -1,12 +1,12 @@
-# CLAUDE.md — Network Docs RAG
+# CLAUDE.md — Distill
 
 Context for AI assistant sessions working in this repo.
 
 ## What this project is
 
-A self-hosted RAG pipeline that ingests vendor network PDFs (Cisco, Juniper, Arista, etc.) into Qdrant and exposes `search_docs()` and `list_docs()` tools via a FastMCP SSE server. Claude connects to the server via `mcp-remote` (desktop app) or native SSE (Claude Code CLI).
+A self-hosted RAG pipeline that ingests technical PDFs (vendor docs, internal guides, curated web pages) into Qdrant and exposes `search_docs()`, `search_community()`, and `list_docs()` tools via a FastMCP SSE server. Any MCP-compatible client (Claude Code CLI via native SSE, Claude Desktop via `mcp-remote`, Cursor, Windsurf, etc.) can connect.
 
-Runs on a remote Ubuntu server with 750 GB RAM at `192.168.0.50`. The user is a network architect/engineer.
+Runs on a remote Ubuntu server with 750 GB RAM at `192.168.0.50`. The user is a network architect/engineer primarily indexing Cisco, Juniper, and Arista/Aruba documentation.
 
 ## Repo layout
 
@@ -55,6 +55,8 @@ Makefile                 — Common tasks (see `make help`)
 
 **Watch mode polls DOCS_DIR every 30 seconds.** `watch_loop()` in `ingest.py` is triggered by `--watch`. It calls `already_ingested()` per file and catches per-file exceptions so a bad PDF doesn't kill the loop — it retries on the next cycle. The `ingest-watch` compose service (profile: `watch`) runs with `restart: unless-stopped`. Start with `make watch`, stop with `make watch-stop`.
 
+**Vendor aliases expand search across acquisition name variants.** `_VENDOR_ALIASES` in `server.py` maps equivalent names (e.g. `aruba`, `hpe`, `hewlett-packard-enterprise`, `arubanetworks`) to the same group. `build_filter()` uses `MatchAny` instead of `MatchValue` so a user searching `vendor=aruba` finds docs tagged `hewlett-packard-enterprise` by gen-sidecars. Add new alias groups when vendor naming is ambiguous.
+
 ## Critical constraints
 
 ### mcp-remote requires --allow-http
@@ -64,7 +66,7 @@ The Claude Desktop config must include `--allow-http` in the args array or mcp-r
 ```json
 {
   "mcpServers": {
-    "network-docs": {
+    "distill": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "http://192.168.0.50:8000/sse", "--allow-http"]
     }
@@ -74,11 +76,11 @@ The Claude Desktop config must include `--allow-http` in the args array or mcp-r
 
 ### GHCR image path includes repo name
 
-The `IMAGE_BASE` in `.env` must be `ghcr.io/afly007/rag-docs` (not just `ghcr.io/afly007`). The release workflow uses `ghcr.io/${{ github.repository }}` which expands to the full `owner/repo` path.
+The `IMAGE_BASE` in `.env` must be `ghcr.io/afly007/distill` (not just `ghcr.io/afly007`). The release workflow uses `ghcr.io/${{ github.repository }}` which expands to the full `owner/repo` path.
 
 GHCR package visibility is independent of repo visibility. Even with a public repo, packages default to private and must be made public manually at:
-- `https://github.com/users/afly007/packages/container/rag-docs%2Fmcp-server/settings`
-- `https://github.com/users/afly007/packages/container/rag-docs%2Fingest/settings`
+- `https://github.com/users/afly007/packages/container/distill%2Fmcp-server/settings`
+- `https://github.com/users/afly007/packages/container/distill%2Fingest/settings`
 
 ## Git workflow
 
@@ -107,15 +109,14 @@ Workflow files (`.github/workflows/`) require the `workflow` OAuth scope to merg
 **Release** (`release.yml`) — runs on push to `main` and `v*` tags:
 - Builds and pushes `mcp-server` and `ingest` images to GHCR
 - On `v*` tags, also pushes a `:vX.Y.Z` tag alongside `:latest` and `:<sha>`
-- SSH deploy step requires secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_TOKEN` — **not yet configured**, deploy is currently manual
 
 ## Deploy
 
-Merges to `main` auto-deploy via the self-hosted GitHub Actions runner (`~/actions-runner` on the server). The runner runs as a systemd service (`actions.runner.afly007-rag-docs.rag-docs-server`).
+Merges to `main` auto-deploy via the self-hosted GitHub Actions runner (`~/actions-runner` on the server). The runner runs as a systemd service (`actions.runner.afly007-distill.distill-server`).
 
 Manual fallback:
 ```bash
-cd ~/rag-docs
+cd ~/distill
 docker compose pull mcp-server
 docker compose up -d mcp-server
 docker compose logs -f mcp-server
@@ -156,28 +157,29 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Tool result could not be submitted` in Claude | Sync OpenAI client blocked event loop | Use `AsyncOpenAI`, never `OpenAI` |
+| `Tool result could not be submitted` in MCP client | Sync OpenAI client blocked event loop | Use `AsyncOpenAI`, never `OpenAI` |
 | `sqlite3.OperationalError: no such column: vendor` | Old DB schema on persistent volume | Migration in `init_db()` adds missing cols |
 | `unsupported format string passed to NoneType.__format__` | `dict.get(key, default)` returns `None` when key exists with None value | Use `value or '—'` not `dict.get(key, '—')` |
 | Stats page 500 on fresh deploy | Pre-existing `queries.db` missing new columns | Same — migration handles it |
-| `pull access denied` for GHCR | Package is private or wrong IMAGE_BASE | Make package public; set `IMAGE_BASE=ghcr.io/afly007/rag-docs` |
+| `pull access denied` for GHCR | Package is private or wrong IMAGE_BASE | Make package public; set `IMAGE_BASE=ghcr.io/afly007/distill` |
 | SSE `terminated: other side closed` after ~6 min idle | Router/firewall killing idle TCP connections | Fixed — SSE ping=30s injected in `main()` before `sse_app()` |
-| `Received request before initialization was complete` | mcp-remote replayed tool calls on a new session before MCP handshake | Start a fresh Claude conversation |
+| `Received request before initialization was complete` | mcp-remote replayed tool calls on a new session before MCP handshake | Start a fresh conversation |
 | Dependabot PRs failing lint | Our code had lint errors before Dependabot ran | Fix lint on `main` first, then `@dependabot rebase` |
 | Hybrid search returns 400 Bad Request | `Fusion.RRF` serialises as `"rrf"` (bare string) but API expects `{"fusion":"rrf"}` | Use `FusionQuery(fusion=Fusion.RRF)` in `query_points` call |
-| Collection migration required for hybrid search | Old collection has unnamed dense vector; hybrid needs named `dense` + sparse `bm25` | `curl -X DELETE http://localhost:6333/collections/network_docs` then `make ingest-force` |
+| Collection migration required for hybrid search | Old collection has unnamed dense vector; hybrid needs named `dense` + sparse `bm25` | `curl -X DELETE http://localhost:6333/collections/distill` then `make ingest-force` |
 | `RERANKER=local` fails with 404 on model download | Wrong model name — flashrank model names differ from sentence-transformers | Use `ms-marco-MiniLM-L-12-v2` not `ms-marco-MiniLM-L-6-v2`; valid names are in `flashrank.Config.model_file_map` |
 | Clip returns 1 chunk for most pages | `_clip_chunk()` heading path only captured text *from* headings, silently dropping all content before the first heading | Fixed — preamble section added before first heading; always verify with `docker exec mcp-server python3 -c "import trafilatura; ..."` |
 | Extension settings link does nothing in Firefox | `chrome.tabs.create()` silently fails without the `"tabs"` permission in Firefox MV3 | Add `"tabs"` to `permissions` array in `manifest.json` |
 | Clip returns "No extractable text" | Page is JS-rendered (React/Angular SPA) or has bot protection | Use three-pass fallback in `_clip_fetch()`; for true SPAs a headless browser would be required |
 | Reddit clips have near-empty content | `www.reddit.com` serves JS-rendered HTML | popup.js auto-rewrites to `old.reddit.com`; already-indexed bad clips must be deleted via Qdrant filter DELETE API |
+| `vendor=aruba` filter returns no results | gen-sidecars tags HPE docs as `hewlett-packard-enterprise` | `_VENDOR_ALIASES` + `MatchAny` in `build_filter()` handles this — add new alias groups for other ambiguous vendor names |
 
 ## Embedding model
 
 `text-embedding-3-small` · 1536 dimensions · cosine similarity
 
 Changing the model requires:
-1. Delete the Qdrant collection: `curl -X DELETE http://localhost:6333/collections/network_docs`
+1. Delete the Qdrant collection: `curl -X DELETE http://localhost:6333/collections/distill`
 2. Update `EMBEDDING_MODEL` and `EMBEDDING_DIM` in both `ingest/ingest.py` and `mcp-server/server.py`
 3. Re-ingest all documents
 

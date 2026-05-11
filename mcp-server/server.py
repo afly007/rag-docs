@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "distill")
 DB_PATH = os.environ.get("DB_PATH", "/data/queries.db")
 EMBEDDING_MODEL = "text-embedding-3-small"
 TOP_K = 5
@@ -1162,7 +1162,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="refresh" content="{refresh_interval}">
-  <title>Network Docs RAG — Stats</title>
+  <title>Distill — Stats</title>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -1216,7 +1216,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
   </style>
 </head>
 <body>
-  <h1>&#9673; Network Docs RAG</h1>
+  <h1>&#9673; Network Docs RAG#9673; Distill</h1>
 
   {_render_active_banner(active)}
 

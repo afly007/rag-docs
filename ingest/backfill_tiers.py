@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "network_docs")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "distill")
 SCROLL_BATCH = 500
 UPSERT_BATCH = 500
 

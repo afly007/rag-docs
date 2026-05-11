@@ -19,7 +19,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+      - COLLECTION_NAME=${COLLECTION_NAME:-distill}
       - DB_PATH=/data/queries.db
       - RERANKER=${RERANKER:-}
       - COHERE_API_KEY=${COHERE_API_KEY:-}
@@ -41,7 +41,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+      - COLLECTION_NAME=${COLLECTION_NAME:-distill}
       - PYTHONUNBUFFERED=1
     depends_on:
       - qdrant
@@ -58,7 +58,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - COLLECTION_NAME=${COLLECTION_NAME:-network_docs}
+      - COLLECTION_NAME=${COLLECTION_NAME:-distill}
       - PYTHONUNBUFFERED=1
     depends_on:
       - qdrant
