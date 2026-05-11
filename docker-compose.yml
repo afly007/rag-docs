@@ -2,8 +2,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
@@ -94,6 +94,11 @@ services:
       - ACMEDNS_HOST=${ACMEDNS_HOST:-}
       # DigitalOcean
       - DO_AUTH_TOKEN=${DO_AUTH_TOKEN:-}
+      # Admin auth (optional — protects /stats and /files)
+      - ADMIN_USER=${ADMIN_USER:-}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
+      # Rate limiting
+      - CLIP_RATE_LIMIT=${CLIP_RATE_LIMIT:-20}
     volumes:
       - caddy_data:/data
       - caddy_config:/config

@@ -65,7 +65,7 @@ CONFIGURATION.md         — Full operational configuration reference (env vars,
 
 **File browser uses shared `lib/ingest_core.py`.** Both the CLI ingestor (`ingest/ingest.py`) and the MCP server's file browser upload handler (`_ingest_file_bg`) import chunking logic from `lib/ingest_core.py`. This module is pure computation — no I/O clients, no tqdm, no print statements. CLI-specific concerns (sync OpenAI client, progress bars, rate-limit retry) stay in `ingest.py`; async concerns (AsyncOpenAI, asyncio.create_task) stay in `server.py`. Both Dockerfiles use root build context (`context: .`) so `COPY lib/ lib/` works.
 
-**Caddy TLS proxy is an optional Docker Compose profile.** `COMPOSE_PROFILES=tls` in `.env` starts the `caddy` service alongside the core stack. `TLS_MODE=internal` uses Caddy's built-in CA (self-signed; clients must import the root cert once). `TLS_MODE=dns` uses Let's Encrypt via DNS-01 challenge (universally trusted; requires domain + DNS provider API key). The custom Caddy image is built with xcaddy and includes four DNS plugins: cloudflare, route53, acmedns, digitalocean. `caddy/entrypoint.sh` generates the Caddyfile at container startup from env vars and validates required variables before starting Caddy. Port 8000 on mcp-server stays exposed so direct HTTP access continues working when TLS is enabled. See `CONFIGURATION.md` for full setup instructions.
+**Caddy TLS proxy is an optional Docker Compose profile.** `COMPOSE_PROFILES=tls` in `.env` starts the `caddy` service alongside the core stack. `TLS_MODE=internal` uses Caddy's built-in CA (self-signed; clients must import the root cert once). `TLS_MODE=dns` uses Let's Encrypt via DNS-01 challenge (universally trusted; requires domain + DNS provider API key). The custom Caddy image is built with xcaddy and includes four DNS plugins: cloudflare, route53, acmedns, digitalocean, plus `caddy-ratelimit` for rate limiting. `caddy/entrypoint.sh` generates the Caddyfile at container startup via a `write_caddyfile()` helper that always includes: security response headers (`HSTS`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, removes `Server`), optional basicauth on `/stats` and `/files` (set `ADMIN_USER` + `ADMIN_PASSWORD_HASH`), and per-IP rate limiting on `/clip` (`CLIP_RATE_LIMIT`, default 20 req/min). The five TLS-mode write functions each supply only their TLS block; all other directives come from the shared helper. Port 8000 on mcp-server stays exposed so direct HTTP access continues working when TLS is enabled. See `CONFIGURATION.md` for full setup instructions.
 
 ## Critical constraints
 
@@ -190,6 +190,8 @@ Pre-commit hooks run ruff automatically on `git commit` (requires `pipx install 
 | `vendor=aruba` filter returns no results | gen-sidecars tags HPE docs as `hewlett-packard-enterprise` | `_VENDOR_ALIASES` + `MatchAny` in `build_filter()` handles this — add new alias groups for other ambiguous vendor names |
 | Caddy CI build takes ~6 minutes | xcaddy compiles Go from source on first run | Normal — GitHub Actions caches the layer; subsequent builds are ~30s |
 | `tls internal` cert not trusted by browser/client | Caddy's root CA is not in the OS trust store | Export with `docker compose cp caddy:/data/pki/authorities/local/root.crt ./caddy-root.crt` and import into the OS/browser trust store on each client |
+| Caddy refuses to start: "ADMIN_PASSWORD_HASH must be set" | `ADMIN_USER` set without `ADMIN_PASSWORD_HASH` (or vice versa) | Both vars must be set together; generate hash with `docker run --rm caddy:2-alpine caddy hash-password --plaintext yourpassword` |
+| `/clip` returns HTTP 429 | Caddy rate limit hit — too many requests from one IP | Increase `CLIP_RATE_LIMIT` in `.env` and restart caddy (`docker compose up -d caddy`) |
 | DNS challenge fails: `no such host` or `NXDOMAIN` | DNS record for `TLS_DOMAIN` doesn't exist or hasn't propagated | Add an A record pointing to the server IP; wait for propagation before starting Caddy |
 | `TLS_DNS_PROVIDER` not set but `TLS_MODE=dns` | entrypoint.sh validates and exits with an error message | Set `TLS_DNS_PROVIDER` to one of: cloudflare, route53, acmedns, digitalocean |
 | File browser upload has no metadata after ingest | Sidecars are generated separately — upload only chunks and embeds | Use the ✦ button on the PDF row to auto-generate metadata, then save |
@@ -212,16 +214,18 @@ This server runs on a private LAN (`192.168.0.50`) — network isolation is the 
 - `/clip` and `/clip/meta` require `Bearer CLIP_API_KEY` header
 - Qdrant write access only via the mcp-server container (no external writes possible without LAN access)
 - Query log (SQLite) is inside a Docker volume, not externally accessible
+- Qdrant ports 6333/6334 bound to `127.0.0.1` only — no direct LAN access to Qdrant (when using Caddy stack)
+- Security response headers on all Caddy-proxied responses (HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Server header removed) when `COMPOSE_PROFILES=tls`
+- `/clip` rate-limited to `CLIP_RATE_LIMIT` req/min per IP via Caddy (default 20) when `COMPOSE_PROFILES=tls`
+- `/stats` and `/files` can be protected with HTTP basic auth via `ADMIN_USER`/`ADMIN_PASSWORD_HASH` when `COMPOSE_PROFILES=tls`
 
 **What is NOT protected (see issues for fixes):**
 - MCP SSE endpoint (`/sse`) has no authentication — any LAN host can call all MCP tools
-- `/stats` page is unauthenticated — exposes document catalog and query history
-- Qdrant port 6333 is bound to the host — any LAN host can read/write/delete the collection directly
+- `/stats` and `/files` are unauthenticated by default (opt-in via `ADMIN_USER`/`ADMIN_PASSWORD_HASH`)
 - `/clip` fetches any URL without SSRF protection — can probe internal services
-- No rate limiting on `/clip` — OpenAI credits can be exhausted by bulk requests
-- All traffic is plaintext HTTP — API keys travel unencrypted on the LAN
+- All traffic is plaintext HTTP (without Caddy) — API keys travel unencrypted when TLS proxy is not enabled
 - Browser extension `host_permissions` is `["http://*/*", "https://*/*"]` — broader than needed
-- CORS on `/clip` is `Allow-Origin: *` — any page can trigger clip requests if key is known
+- CORS on `/clip` is `Allow-Origin: *` — any page can trigger clip requests if the key is known
 
 ## Pending work
 
