@@ -1309,9 +1309,11 @@ def _render_files_page() -> str:
     header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
              border-bottom: 1px solid #21262d; }
     header h1 { font-size: .9rem; color: #58a6ff; letter-spacing: .04em; flex: 1; }
+    header nav { display: flex; gap: 6px; }
     header nav a { font-size: .75rem; color: #484f58; text-decoration: none;
                    padding: 4px 10px; border: 1px solid #30363d; border-radius: 6px; }
     header nav a:hover { color: #c9d1d9; border-color: #58a6ff; }
+    header nav a.active { color: #c9d1d9; border-color: #58a6ff; background: #1f2d45; }
 
     main { max-width: 1100px; margin: 0 auto; padding: 24px; }
 
@@ -1397,8 +1399,9 @@ def _render_files_page() -> str:
 </head>
 <body>
   <header>
-    <h1>&#9673; Distill — Files</h1>
+    <h1>&#9673; Distill</h1>
     <nav>
+      <a href="/files" class="active">Files</a>
       <a href="/stats">Stats</a>
     </nav>
   </header>
@@ -1998,9 +2001,17 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
-      background: #0d1117; color: #c9d1d9; padding: 2rem; min-height: 100vh;
+      background: #0d1117; color: #c9d1d9; min-height: 100vh;
     }}
-    h1 {{ font-size: 1.4rem; color: #58a6ff; margin-bottom: 1.5rem; letter-spacing: .03em; }}
+    header {{ display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+              border-bottom: 1px solid #21262d; }}
+    header h1 {{ font-size: .9rem; color: #58a6ff; letter-spacing: .04em; flex: 1; }}
+    header nav {{ display: flex; gap: 6px; }}
+    header nav a {{ font-size: .75rem; color: #484f58; text-decoration: none;
+                    padding: 4px 10px; border: 1px solid #30363d; border-radius: 6px; }}
+    header nav a:hover {{ color: #c9d1d9; border-color: #58a6ff; }}
+    header nav a.active {{ color: #c9d1d9; border-color: #58a6ff; background: #1f2d45; }}
+    main {{ padding: 2rem; }}
     h2 {{ font-size: .85rem; color: #8b949e; text-transform: uppercase;
           letter-spacing: .1em; margin: 2rem 0 .75rem; }}
     .cards {{ display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: .5rem; }}
@@ -2047,7 +2058,14 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
   </style>
 </head>
 <body>
-  <h1>&#9673; Network Docs RAG#9673; Distill</h1>
+  <header>
+    <h1>&#9673; Distill</h1>
+    <nav>
+      <a href="/files">Files</a>
+      <a href="/stats" class="active">Stats</a>
+    </nav>
+  </header>
+  <main>
 
   {_render_active_banner(active)}
 
@@ -2124,6 +2142,7 @@ def render_stats(qdrant_stats: dict, active: dict) -> str:
     <span style="color:#d29922"> 3=internal</span>
     <span style="color:#f85149"> 4=community (search_community only)</span>
   </p>
+  </main>
 </body>
 </html>"""
 
