@@ -15,7 +15,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import uvicorn
 from mcp.server.fastmcp import FastMCP
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
@@ -901,17 +901,8 @@ async def clip_handler(request):
 
             chunks = _clip_chunk(text, url, meta)
 
-            # Embed in batches of 100
-            texts = [c["text"] for c in chunks]
-            all_embeddings: list = []
-            for i in range(0, len(texts), 100):
-                resp = await openai_client.embeddings.create(
-                    model=EMBEDDING_MODEL, input=texts[i : i + 100]
-                )
-                all_embeddings.extend(r.embedding for r in resp.data)
-
-            for chunk, vec in zip(chunks, all_embeddings):
-                chunk["vector"] = vec
+            chunks = await _embed_chunks_async(chunks)
+            for chunk in chunks:
                 chunk["sparse"] = compute_sparse(chunk["text"])
 
             points = [
@@ -973,14 +964,32 @@ def _safe_path(raw: str) -> Path | None:
         return None
 
 
+def _parse_retry_after(exc: RateLimitError, default: float = 60.0) -> float:
+    """Extract wait seconds from a 429 error message, with a safe default."""
+    match = re.search(r"try again in (\d+(?:\.\d+)?)(ms|s)", str(exc))
+    if match:
+        value, unit = float(match.group(1)), match.group(2)
+        return (value / 1000 if unit == "ms" else value) + 1.0
+    return default
+
+
+async def _embed_batch_with_retry(texts: list[str]) -> list:
+    """Embed one batch of texts, retrying on 429 with the server-specified wait."""
+    while True:
+        try:
+            resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+            return [r.embedding for r in resp.data]
+        except RateLimitError as exc:
+            wait = _parse_retry_after(exc)
+            log.warning("embedding rate limit — retrying in %.1fs", wait)
+            await asyncio.sleep(wait)
+
+
 async def _embed_chunks_async(chunks: list[dict]) -> list[dict]:
     texts = [c["text"] for c in chunks]
     all_embeddings: list = []
     for i in range(0, len(texts), EMBED_BATCH):
-        resp = await openai_client.embeddings.create(
-            model=EMBEDDING_MODEL, input=texts[i : i + EMBED_BATCH]
-        )
-        all_embeddings.extend(r.embedding for r in resp.data)
+        all_embeddings.extend(await _embed_batch_with_retry(texts[i : i + EMBED_BATCH]))
     for chunk, vec in zip(chunks, all_embeddings):
         chunk["vector"] = vec
     return chunks
